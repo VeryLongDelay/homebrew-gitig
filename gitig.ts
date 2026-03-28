@@ -112,7 +112,7 @@ function printHelp(): void {
   console.log(
     `
 gitig
-
+    The ignorant CLI for generating and managing .gitignore files.
 Usage:
     gitig list [--source github|gh|ghg|ghc|gitignoreio|tt|all]
     gitig search <query> [--source github|gh|ghg|ghc|gitignoreio|tt|all]
@@ -150,18 +150,6 @@ Examples:
     gitig compact
     gitig compact .gitignore
     gitig compact .gitignore --output .gitignore.clean --force
-
-    gitig doctor
-    gitig stats
-    gitig check
-
-Notes:
-    - ghg uses names relative to Global/, so ghg:macOS resolves to Global/macOS
-    - ghc uses names relative to community/, so ghc:Python/Poetry resolves to community/Python/Poetry
-    - template matching is case-insensitive
-    - provider prefixes can be sticky, so "gh: node python" means "gh:node gh:python"
-    - --no-comments (-nc) removes full-line comments, collapses blank runs, and preserves escaped \# lines
-    - compact applies the same stripping rules to an existing .gitignore-like file
 `.trim(),
   );
 }
@@ -311,7 +299,7 @@ function parseArgs(argv: string[]): Args {
       continue;
     }
 
-    if (arg === "--no-comments" || arg === "-nc") {
+    if (arg === "--no-comments" || arg === "--no-comment" || arg === "-nc" || arg === "-n") {
       noComments = true;
       continue;
     }
@@ -1333,12 +1321,12 @@ async function cmdCompact(inputPath: string | undefined, outputPath: string, for
 }
 
 function renderCompletionDataScript(): string {
-  return String.raw`_gitig_commands="${COMMANDS.join(" ")}" 
-_gitig_all_sources="${ALL_SOURCE_VALUES.join(" ")}" 
-_gitig_single_sources="${SINGLE_SOURCE_VALUES.join(" ")}" 
-_gitig_detect_sources="${DETECT_SOURCE_VALUES.join(" ")}" 
-_gitig_include_values="${INCLUDE_VALUE_SUGGESTIONS.join(" ")}" 
-_gitig_shells="${SHELLS.join(" ")}" 
+  return String.raw`_gitig_commands="${COMMANDS.join(" ")}"
+_gitig_all_sources="${ALL_SOURCE_VALUES.join(" ")}"
+_gitig_single_sources="${SINGLE_SOURCE_VALUES.join(" ")}"
+_gitig_detect_sources="${DETECT_SOURCE_VALUES.join(" ")}"
+_gitig_include_values="${INCLUDE_VALUE_SUGGESTIONS.join(" ")}"
+_gitig_shells="${SHELLS.join(" ")}"
 _gitig_common_flags="--source -s --no-cache"
 _gitig_mutating_flags="--output -o --force -f --no-cache --no-comments -nc"
 _gitig_detect_flags="--source -s --include --output -o --force -f --no-cache --no-comments -nc"
@@ -1668,11 +1656,11 @@ async function safeLoadCatalog(source: SourceName, noCache: boolean): Promise<{ 
     }
 
     const [github, gitignoreio] = await Promise.all([getGitHubCatalogWithCache(noCache), getGitignoreIoCatalogWithCache(noCache)]);
-      return {
-        ok: true,
-        detail: `${github.catalog.length + gitignoreio.catalog.length} templates available; github cache ${formatCacheStatus(github.cache, noCache)}; gitignore.io cache ${formatCacheStatus(gitignoreio.cache, noCache)}`,
-        count: github.catalog.length + gitignoreio.catalog.length,
-      };
+    return {
+      ok: true,
+      detail: `${github.catalog.length + gitignoreio.catalog.length} templates available; github cache ${formatCacheStatus(github.cache, noCache)}; gitignore.io cache ${formatCacheStatus(gitignoreio.cache, noCache)}`,
+      count: github.catalog.length + gitignoreio.catalog.length,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
