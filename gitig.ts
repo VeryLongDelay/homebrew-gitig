@@ -1,7 +1,7 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /* eslint-disable no-console */
 
-import { mkdir } from "node:fs/promises";
+import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -62,6 +62,26 @@ type StatsRow = {
   count: number;
 };
 
+type CacheStatus = {
+  exists: boolean;
+  fresh: boolean;
+  ageMs: number | null;
+  ttlMs: number;
+  path: string;
+};
+
+type CatalogLoadResult = {
+  catalog: CatalogEntry[];
+  cache: CacheStatus;
+};
+
+type ShellName = "bash" | "zsh" | "fish";
+
+type SelfTestCase = {
+  name: string;
+  run: () => void | Promise<void>;
+};
+
 const GITHUB_API_BASE = "https://api.github.com";
 const GITHUB_REPO = "github/gitignore";
 const GITHUB_BRANCH = "main";
@@ -72,7 +92,7 @@ const GITIGNORE_IO_BASE = "https://www.toptal.com/developers/gitignore/api";
 const CACHE_DIR = join(homedir(), ".cache", "gitig");
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
 
-const COMMANDS = ["list", "search", "view", "init", "I", "i", "detect", "compact", "doctor", "stats", "completion", "install-completion", "help"] as const;
+const COMMANDS = ["list", "search", "view", "init", "I", "i", "detect", "compact", "doctor", "stats", "check", "selftest", "completion", "install-completion", "help"] as const;
 
 const SOURCE_ALIASES = {
   gh: "github",
@@ -82,6 +102,11 @@ const SOURCE_ALIASES = {
 } as const;
 
 const DETECT_INCLUDE_VALUES = ["os", "editor"] as const;
+const ALL_SOURCE_VALUES = ["github", "gh", "ghg", "ghc", "gitignoreio", "tt", "all"] as const;
+const SINGLE_SOURCE_VALUES = ["github", "gh", "ghg", "ghc", "gitignoreio", "tt"] as const;
+const DETECT_SOURCE_VALUES = ["github", "gh", "ghg", "gitignoreio", "tt"] as const;
+const INCLUDE_VALUE_SUGGESTIONS = ["os", "editor", "os,editor"] as const;
+const SHELLS: readonly ShellName[] = ["bash", "zsh", "fish"] as const;
 
 function printHelp(): void {
   console.log(
@@ -97,8 +122,10 @@ Usage:
     gitig i <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--force] [--no-comments|-nc]
     gitig detect [--source github|gh|ghg|gitignoreio|tt] [--include os,editor] [--output .gitignore] [--force] [--no-comments|-nc]
     gitig compact [input] [--output file] [--force]
-    gitig doctor
-    gitig stats [--source github|gh|ghg|ghc|gitignoreio|tt|all]
+    gitig doctor [--no-cache]
+    gitig stats [--source github|gh|ghg|ghc|gitignoreio|tt|all] [--no-cache]
+    gitig check
+    gitig selftest
     gitig completion <bash|zsh|fish>
     gitig install-completion <bash|zsh|fish>
 
@@ -124,16 +151,17 @@ Examples:
     gitig compact .gitignore
     gitig compact .gitignore --output .gitignore.clean --force
 
+    gitig doctor
     gitig stats
-    gitig stats --source gh
+    gitig check
 
 Notes:
     - ghg uses names relative to Global/, so ghg:macOS resolves to Global/macOS
     - ghc uses names relative to community/, so ghc:Python/Poetry resolves to community/Python/Poetry
     - template matching is case-insensitive
     - provider prefixes can be sticky, so "gh: node python" means "gh:node gh:python"
-    - --no-comments (-nc) removes full-line comments and empty lines
-    - compact removes comments from an existing .gitignore-like file
+    - --no-comments (-nc) removes full-line comments, collapses blank runs, and preserves escaped \# lines
+    - compact applies the same stripping rules to an existing .gitignore-like file
 `.trim(),
   );
 }
@@ -339,21 +367,56 @@ async function ensureCacheDir(): Promise<void> {
   await ensureDir(CACHE_DIR);
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getCacheStatus(path: string): Promise<CacheStatus> {
+  try {
+    if (!(await pathExists(path))) {
+      return {
+        exists: false,
+        fresh: false,
+        ageMs: null,
+        ttlMs: CACHE_TTL_MS,
+        path,
+      };
+    }
+
+    const fileStat = await stat(path);
+    const ageMs = Date.now() - fileStat.mtime.getTime();
+
+    return {
+      exists: true,
+      fresh: ageMs <= CACHE_TTL_MS,
+      ageMs,
+      ttlMs: CACHE_TTL_MS,
+      path,
+    };
+  } catch {
+    return {
+      exists: false,
+      fresh: false,
+      ageMs: null,
+      ttlMs: CACHE_TTL_MS,
+      path,
+    };
+  }
+}
+
 async function readCacheJson<T>(path: string): Promise<T | null> {
   try {
-    const file = Bun.file(path);
-    if (!(await file.exists())) {
+    const status = await getCacheStatus(path);
+    if (!status.exists || !status.fresh) {
       return null;
     }
 
-    const stat = await file.stat();
-    const ageMs = Date.now() - stat.mtime.getTime();
-
-    if (ageMs > CACHE_TTL_MS) {
-      return null;
-    }
-
-    return JSON.parse(await file.text()) as T;
+    return JSON.parse(await readFile(path, "utf8")) as T;
   } catch {
     return null;
   }
@@ -361,11 +424,52 @@ async function readCacheJson<T>(path: string): Promise<T | null> {
 
 async function writeCacheJson(path: string, value: unknown): Promise<void> {
   await ensureCacheDir();
-  await Bun.write(path, JSON.stringify(value, null, 2));
+  await writeFile(path, JSON.stringify(value, null, 2), "utf8");
 }
 
 function cachePathFor(name: string): string {
   return join(CACHE_DIR, `${name}.json`);
+}
+
+function formatAgeMs(ageMs: number | null): string {
+  if (ageMs === null) {
+    return "missing";
+  }
+
+  const totalSeconds = Math.max(0, Math.floor(ageMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    return `${days}d ${hours % 24}h`;
+  }
+
+  if (hours > 0) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${totalSeconds % 60}s`;
+  }
+
+  return `${totalSeconds}s`;
+}
+
+function formatCacheStatus(status: CacheStatus, noCache: boolean): string {
+  if (noCache) {
+    return `bypassed (${status.path})`;
+  }
+
+  if (!status.exists) {
+    return `miss; file missing (${status.path})`;
+  }
+
+  if (!status.fresh) {
+    return `stale; age=${formatAgeMs(status.ageMs)} ttl=${formatAgeMs(status.ttlMs)} (${status.path})`;
+  }
+
+  return `hit; age=${formatAgeMs(status.ageMs)} ttl=${formatAgeMs(status.ttlMs)} (${status.path})`;
 }
 
 function classifyGitHubTemplate(path: string): CatalogEntry | null {
@@ -414,13 +518,17 @@ function classifyGitHubTemplate(path: string): CatalogEntry | null {
   };
 }
 
-async function getGitHubCatalog(noCache: boolean): Promise<CatalogEntry[]> {
+async function getGitHubCatalogWithCache(noCache: boolean): Promise<CatalogLoadResult> {
   const cachePath = cachePathFor("github-catalog");
+  const cache = await getCacheStatus(cachePath);
 
   if (!noCache) {
     const cached = await readCacheJson<CatalogEntry[]>(cachePath);
     if (cached !== null) {
-      return cached;
+      return {
+        catalog: cached,
+        cache,
+      };
     }
   }
 
@@ -436,16 +544,23 @@ async function getGitHubCatalog(noCache: boolean): Promise<CatalogEntry[]> {
     await writeCacheJson(cachePath, catalog);
   }
 
-  return catalog;
+  return {
+    catalog,
+    cache: await getCacheStatus(cachePath),
+  };
 }
 
-async function getGitignoreIoCatalog(noCache: boolean): Promise<CatalogEntry[]> {
+async function getGitignoreIoCatalogWithCache(noCache: boolean): Promise<CatalogLoadResult> {
   const cachePath = cachePathFor("gitignoreio-catalog");
+  const cache = await getCacheStatus(cachePath);
 
   if (!noCache) {
     const cached = await readCacheJson<CatalogEntry[]>(cachePath);
     if (cached !== null) {
-      return cached;
+      return {
+        catalog: cached,
+        cache,
+      };
     }
   }
 
@@ -467,7 +582,18 @@ async function getGitignoreIoCatalog(noCache: boolean): Promise<CatalogEntry[]> 
     await writeCacheJson(cachePath, catalog);
   }
 
-  return catalog;
+  return {
+    catalog,
+    cache: await getCacheStatus(cachePath),
+  };
+}
+
+async function getGitHubCatalog(noCache: boolean): Promise<CatalogEntry[]> {
+  return (await getGitHubCatalogWithCache(noCache)).catalog;
+}
+
+async function getGitignoreIoCatalog(noCache: boolean): Promise<CatalogEntry[]> {
+  return (await getGitignoreIoCatalogWithCache(noCache)).catalog;
 }
 
 function filterGitHubCatalogByScope(catalog: CatalogEntry[], scope: GitHubScope): CatalogEntry[] {
@@ -745,29 +871,47 @@ async function getGitignoreIoTemplateContent(keys: string[]): Promise<string> {
   return await fetchText(`${GITIGNORE_IO_BASE}/${encodeURIComponent(joined)}`);
 }
 
-function stripCommentLines(content: string): string {
+function isCommentLine(trimmed: string): boolean {
+  return trimmed.startsWith("#") && !trimmed.startsWith("\\#");
+}
+
+function compactIgnoreContent(content: string): string {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const kept: string[] = [];
+  let previousBlank = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
 
     if (trimmed.length === 0) {
+      if (!previousBlank && kept.length > 0) {
+        kept.push("");
+        previousBlank = true;
+      }
       continue;
     }
 
-    if (trimmed.startsWith("#") && !trimmed.startsWith("\\#")) {
+    if (isCommentLine(trimmed)) {
       continue;
     }
 
     kept.push(line);
+    previousBlank = false;
   }
 
-  return kept.join("\n").replace(/\n*$/, "\n");
+  while (kept.length > 0 && kept[kept.length - 1] === "") {
+    kept.pop();
+  }
+
+  return kept.length > 0 ? `${kept.join("\n")}\n` : "";
+}
+
+function stripCommentLines(content: string): string {
+  return compactIgnoreContent(content);
 }
 
 function applyNoComments(content: string, noComments: boolean): string {
-  return noComments ? stripCommentLines(content) : content;
+  return noComments ? compactIgnoreContent(content) : content;
 }
 
 function dedupeLines(content: string): string {
@@ -795,10 +939,6 @@ function displayNameForSource(entry: CatalogEntry, source: SourceName): string {
   }
 
   return entry.displayName;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  return await Bun.file(path).exists();
 }
 
 async function getDetectedExtras(provider: Provider, includes: DetectInclude[]): Promise<string[]> {
@@ -1066,8 +1206,7 @@ async function cmdInit(rawNames: string[], source: SourceName, output: string, f
     throw new Error("Please provide at least one template name");
   }
 
-  const target = Bun.file(output);
-  if ((await target.exists()) && !force) {
+  if ((await pathExists(output)) && !force) {
     console.error(`${output} already exists. Use --force to overwrite.`);
     process.exit(1);
   }
@@ -1144,14 +1283,14 @@ async function cmdInit(rawNames: string[], source: SourceName, output: string, f
       }
     }
 
-    content = `${parts.join("\n\n")}\n`;
+    content = parts.length > 0 ? `${parts.join("\n\n")}\n` : "";
   } else {
     const keys = resolved.map((entry) => entry.key);
     const generated = await getGitignoreIoTemplateContent(keys);
     content = applyNoComments(dedupeLines(generated), noComments);
   }
 
-  await Bun.write(output, content);
+  await writeFile(output, content, "utf8");
   console.log(`Wrote ${output}`);
 }
 
@@ -1175,108 +1314,234 @@ async function cmdDetect(source: SourceName, output: string, force: boolean, noC
 
 async function cmdCompact(inputPath: string | undefined, outputPath: string, force: boolean): Promise<void> {
   const input = inputPath?.trim().length ? inputPath : ".gitignore";
-  const inputFile = Bun.file(input);
-
-  if (!(await inputFile.exists())) {
+  if (!(await pathExists(input))) {
     throw new Error(`Input file not found: ${input}`);
   }
 
   const sameTarget = input === outputPath;
-  const outputFile = Bun.file(outputPath);
 
-  if (!sameTarget && (await outputFile.exists()) && !force) {
+  if (!sameTarget && (await pathExists(outputPath)) && !force) {
     console.error(`${outputPath} already exists. Use --force to overwrite.`);
     process.exit(1);
   }
 
-  const original = await inputFile.text();
-  const compacted = stripCommentLines(original);
+  const original = await readFile(input, "utf8");
+  const compacted = compactIgnoreContent(original);
 
-  await Bun.write(outputPath, compacted);
+  await writeFile(outputPath, compacted, "utf8");
   console.log(`Wrote ${outputPath}`);
 }
 
+function renderCompletionDataScript(): string {
+  return String.raw`_gitig_commands="${COMMANDS.join(" ")}" 
+_gitig_all_sources="${ALL_SOURCE_VALUES.join(" ")}" 
+_gitig_single_sources="${SINGLE_SOURCE_VALUES.join(" ")}" 
+_gitig_detect_sources="${DETECT_SOURCE_VALUES.join(" ")}" 
+_gitig_include_values="${INCLUDE_VALUE_SUGGESTIONS.join(" ")}" 
+_gitig_shells="${SHELLS.join(" ")}" 
+_gitig_common_flags="--source -s --no-cache"
+_gitig_mutating_flags="--output -o --force -f --no-cache --no-comments -nc"
+_gitig_detect_flags="--source -s --include --output -o --force -f --no-cache --no-comments -nc"
+_gitig_compact_flags="--output -o --force -f"
+_gitig_doctor_flags="--no-cache"
+
+_gitig_template_stub() {
+    local cur="$1"
+    local mode="$2"
+
+    case "$mode" in
+        detect)
+            COMPREPLY=( $(compgen -W "$_gitig_detect_sources" -- "$cur") )
+            ;;
+        single-source)
+            COMPREPLY=( $(compgen -W "$_gitig_single_sources" -- "$cur") )
+            ;;
+        any-source)
+            COMPREPLY=( $(compgen -W "$_gitig_all_sources" -- "$cur") )
+            ;;
+        include)
+            COMPREPLY=( $(compgen -W "$_gitig_include_values" -- "$cur") )
+            ;;
+        shell)
+            COMPREPLY=( $(compgen -W "$_gitig_shells" -- "$cur") )
+            ;;
+        template)
+            COMPREPLY=( )
+            ;;
+        *)
+            COMPREPLY=( )
+            ;;
+    esac
+}
+`;
+}
+
 function renderBashCompletion(): string {
-  return String.raw`_gitig_completion() {
+  return `${renderCompletionDataScript()}${String.raw`
+_gitig_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="list search view init I i detect compact doctor stats completion install-completion help"
-    local sources="github gh ghg ghc gitignoreio tt all"
-    local detect_sources="github gh ghg gitignoreio tt"
-    local include_values="os editor os,editor"
-    local shells="bash zsh fish"
-
     if [[ $cword -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        COMPREPLY=( $(compgen -W "$_gitig_commands" -- "$cur") )
         return
     fi
 
-    case "${words[1]}" in
+    case "\${words[1]}" in
         completion|install-completion)
-            COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
+            _gitig_template_stub "$cur" shell
             return
             ;;
         list|search|stats)
             if [[ "$prev" == "--source" || "$prev" == "-s" ]]; then
-                COMPREPLY=( $(compgen -W "$sources" -- "$cur") )
+                _gitig_template_stub "$cur" any-source
                 return
             fi
-            COMPREPLY=( $(compgen -W "--source -s --no-cache" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$_gitig_common_flags" -- "$cur") )
             return
             ;;
         detect)
             if [[ "$prev" == "--source" || "$prev" == "-s" ]]; then
-                COMPREPLY=( $(compgen -W "$detect_sources" -- "$cur") )
+                _gitig_template_stub "$cur" detect
                 return
             fi
             if [[ "$prev" == "--include" ]]; then
-                COMPREPLY=( $(compgen -W "$include_values" -- "$cur") )
+                _gitig_template_stub "$cur" include
                 return
             fi
-            COMPREPLY=( $(compgen -W "--source -s --include --output -o --force -f --no-cache --no-comments -nc" -- "$cur") )
+            if [[ "$cur" == --* || "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "$_gitig_detect_flags" -- "$cur") )
+                return
+            fi
+            _gitig_template_stub "$cur" template
             return
             ;;
         compact)
-            COMPREPLY=( $(compgen -W "--output -o --force -f" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$_gitig_compact_flags" -- "$cur") )
             return
             ;;
-        doctor)
-            COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") )
+        doctor|check|selftest)
+            COMPREPLY=( $(compgen -W "$_gitig_doctor_flags" -- "$cur") )
             return
             ;;
         view|init|I|i)
             if [[ "$prev" == "--source" || "$prev" == "-s" ]]; then
-                COMPREPLY=( $(compgen -W "github gh ghg ghc gitignoreio tt" -- "$cur") )
+                _gitig_template_stub "$cur" single-source
                 return
             fi
 
-            if [[ "$cur" == --* ]]; then
-                COMPREPLY=( $(compgen -W "--source -s --output -o --force -f --no-cache --no-comments -nc" -- "$cur") )
+            if [[ "$cur" == --* || "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "$_gitig_mutating_flags" -- "$cur") )
                 return
             fi
+
+            _gitig_template_stub "$cur" template
+            return
             ;;
     esac
 }
 
 complete -F _gitig_completion gitig
-`;
+`}`;
 }
 
 function renderZshCompletion(): string {
   return String.raw`#compdef gitig
 
+local -a _gitig_commands
+local -a _gitig_all_sources
+local -a _gitig_single_sources
+local -a _gitig_detect_sources
+local -a _gitig_include_values
+local -a _gitig_shells
+
+_gitig_commands=(list search view init I i detect compact doctor stats check selftest completion install-completion help)
+_gitig_all_sources=(github gh ghg ghc gitignoreio tt all)
+_gitig_single_sources=(github gh ghg ghc gitignoreio tt)
+_gitig_detect_sources=(github gh ghg gitignoreio tt)
+_gitig_include_values=(os editor os,editor)
+_gitig_shells=(bash zsh fish)
+
+_gitig_template_stub() {
+    local mode="$1"
+
+    case "$mode" in
+        shell)
+            _describe -t shells 'shells' _gitig_shells
+            ;;
+        include)
+            _describe -t includes 'includes' _gitig_include_values
+            ;;
+        detect-source)
+            _describe -t sources 'sources' _gitig_detect_sources
+            ;;
+        single-source)
+            _describe -t sources 'sources' _gitig_single_sources
+            ;;
+        any-source)
+            _describe -t sources 'sources' _gitig_all_sources
+            ;;
+        template)
+            _files
+            ;;
+    esac
+}
+
 _gitig() {
+    local context state line
+
     _arguments -C \
-        '1:command:(list search view init I i detect compact doctor stats completion install-completion help)' \
-        '--source[template source]:source:(github gh ghg ghc gitignoreio tt all)' \
-        '--include[extra detect categories]:include:(os editor os,editor)' \
+        '1:command:->command' \
+        '--source[template source]:source:->source' \
+        '-s[template source]:source:->source' \
+        '--include[extra detect categories]:include:->include' \
         '--output[output file]:file:_files' \
+        '-o[output file]:file:_files' \
         '--force[overwrite output file]' \
+        '-f[overwrite output file]' \
         '--no-cache[disable catalog cache]' \
-        '--no-comments[strip full-line comments and empty lines]' \
-        '-nc[strip full-line comments and empty lines]' \
-        '*::arg:_files'
+        '--no-comments[strip full-line comments and collapse blank runs]' \
+        '-nc[strip full-line comments and collapse blank runs]' \
+        '*::arg:->args'
+
+    case "$state" in
+        command)
+            _describe -t commands 'commands' _gitig_commands
+            return
+            ;;
+        source)
+            case "$words[2]" in
+                detect)
+                    _gitig_template_stub detect-source
+                    ;;
+                list|search|stats)
+                    _gitig_template_stub any-source
+                    ;;
+                *)
+                    _gitig_template_stub single-source
+                    ;;
+            esac
+            return
+            ;;
+        include)
+            _gitig_template_stub include
+            return
+            ;;
+        args)
+            case "$words[2]" in
+                completion|install-completion)
+                    _gitig_template_stub shell
+                    ;;
+                view|init|I|i|detect)
+                    _gitig_template_stub template
+                    ;;
+                *)
+                    _files
+                    ;;
+            esac
+            return
+            ;;
+    esac
 }
 
 _gitig "$@"
@@ -1285,7 +1550,7 @@ _gitig "$@"
 
 function renderFishCompletion(): string {
   return String.raw`complete -c gitig -f
-complete -c gitig -n "__fish_use_subcommand" -a "list search view init I i detect compact doctor stats completion install-completion help"
+complete -c gitig -n "__fish_use_subcommand" -a "list search view init I i detect compact doctor stats check selftest completion install-completion help"
 complete -c gitig -n "__fish_seen_subcommand_from completion install-completion" -a "bash zsh fish"
 complete -c gitig -n "__fish_seen_subcommand_from list search stats" -l source -s s -a "github gh ghg ghc gitignoreio tt all"
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l source -s s -a "github gh ghg gitignoreio tt"
@@ -1297,7 +1562,7 @@ complete -c gitig -n "__fish_seen_subcommand_from detect" -l no-comments
 complete -c gitig -n "__fish_seen_subcommand_from detect" -s nc
 complete -c gitig -n "__fish_seen_subcommand_from compact" -l output -s o -r
 complete -c gitig -n "__fish_seen_subcommand_from compact" -l force -s f
-complete -c gitig -n "__fish_seen_subcommand_from doctor" -l no-cache
+complete -c gitig -n "__fish_seen_subcommand_from doctor check selftest" -l no-cache
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l source -s s -a "github gh ghg ghc gitignoreio tt"
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l output -s o -r
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l force -s f
@@ -1355,7 +1620,7 @@ function getCompletionInstallTarget(shellName: string): {
 async function cmdInstallCompletion(shellName: string): Promise<void> {
   const target = getCompletionInstallTarget(shellName);
   await ensureDir(dirname(target.path));
-  await Bun.write(target.path, target.content);
+  await writeFile(target.path, target.content, "utf8");
   console.log(`Installed ${shellName} completion to ${target.path}`);
   console.log(target.note);
 }
@@ -1372,8 +1637,8 @@ async function canReadWriteDir(path: string): Promise<boolean> {
   try {
     await ensureDir(path);
     const probe = join(path, ".gitig-write-test");
-    await Bun.write(probe, "ok");
-    await Bun.file(probe).delete();
+    await writeFile(probe, "ok", "utf8");
+    await rm(probe);
     return true;
   } catch {
     return false;
@@ -1382,12 +1647,32 @@ async function canReadWriteDir(path: string): Promise<boolean> {
 
 async function safeLoadCatalog(source: SourceName, noCache: boolean): Promise<{ ok: boolean; detail: string; count: number }> {
   try {
-    const catalog = await getCatalog(source, noCache);
-    return {
-      ok: true,
-      detail: `${catalog.length} templates available`,
-      count: catalog.length,
-    };
+    if (source === "github" || source === "github-global" || source === "github-community") {
+      const result = await getGitHubCatalogWithCache(noCache);
+      const scope = sourceToGitHubScope(source);
+      const filtered = scope === null ? result.catalog : filterGitHubCatalogByScope(result.catalog, scope);
+      return {
+        ok: true,
+        detail: `${filtered.length} templates available; cache ${formatCacheStatus(result.cache, noCache)}`,
+        count: filtered.length,
+      };
+    }
+
+    if (source === "gitignoreio") {
+      const result = await getGitignoreIoCatalogWithCache(noCache);
+      return {
+        ok: true,
+        detail: `${result.catalog.length} templates available; cache ${formatCacheStatus(result.cache, noCache)}`,
+        count: result.catalog.length,
+      };
+    }
+
+    const [github, gitignoreio] = await Promise.all([getGitHubCatalogWithCache(noCache), getGitignoreIoCatalogWithCache(noCache)]);
+      return {
+        ok: true,
+        detail: `${github.catalog.length + gitignoreio.catalog.length} templates available; github cache ${formatCacheStatus(github.cache, noCache)}; gitignore.io cache ${formatCacheStatus(gitignoreio.cache, noCache)}`,
+        count: github.catalog.length + gitignoreio.catalog.length,
+      };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -1495,7 +1780,7 @@ async function cmdDoctor(noCache: boolean): Promise<void> {
     });
   }
 
-  for (const shellName of ["bash", "zsh", "fish"] as const) {
+  for (const shellName of SHELLS) {
     try {
       const target = getCompletionInstallTarget(shellName);
       completionChecks.push({
@@ -1550,50 +1835,155 @@ function printStatsTable(rows: StatsRow[]): void {
 
 async function cmdStats(source: SourceName, noCache: boolean): Promise<void> {
   if (source === "all") {
-    const github = await getGitHubCatalog(noCache);
-    const gitignoreio = await getGitignoreIoCatalog(noCache);
+    const github = await getGitHubCatalogWithCache(noCache);
+    const gitignoreio = await getGitignoreIoCatalogWithCache(noCache);
 
     const rows: StatsRow[] = [
-      { label: "github total", count: github.length },
+      { label: "github total", count: github.catalog.length },
       {
         label: "github root",
-        count: github.filter((entry) => entry.githubScope === "root").length,
+        count: github.catalog.filter((entry) => entry.githubScope === "root").length,
       },
       {
         label: "github global",
-        count: github.filter((entry) => entry.githubScope === "global").length,
+        count: github.catalog.filter((entry) => entry.githubScope === "global").length,
       },
       {
         label: "github community",
-        count: github.filter((entry) => entry.githubScope === "community").length,
+        count: github.catalog.filter((entry) => entry.githubScope === "community").length,
       },
-      { label: "gitignore.io total", count: gitignoreio.length },
-      { label: "all combined", count: github.length + gitignoreio.length },
+      { label: "gitignore.io total", count: gitignoreio.catalog.length },
+      { label: "all combined", count: github.catalog.length + gitignoreio.catalog.length },
     ];
 
     printStatsTable(rows);
+    console.log(`\nGitHub cache: ${formatCacheStatus(github.cache, noCache)}`);
+    console.log(`gitignore.io cache: ${formatCacheStatus(gitignoreio.cache, noCache)}`);
     return;
   }
 
-  const catalog = await getCatalog(source, noCache);
+  if (source === "gitignoreio") {
+    const result = await getGitignoreIoCatalogWithCache(noCache);
+    printStatsTable([{ label: "gitignore.io", count: result.catalog.length }]);
+    console.log(`\nCache: ${formatCacheStatus(result.cache, noCache)}`);
+    return;
+  }
 
-  let label = source;
-  if (source === "github") {
-    label = "github";
-  } else if (source === "github-global") {
+  const result = await getGitHubCatalogWithCache(noCache);
+  const scope = sourceToGitHubScope(source);
+  const filtered = scope === null ? result.catalog : filterGitHubCatalogByScope(result.catalog, scope);
+
+  let label = "github";
+  if (source === "github-global") {
     label = "github global";
   } else if (source === "github-community") {
     label = "github community";
-  } else if (source === "gitignoreio") {
-    label = "gitignore.io";
   }
 
-  printStatsTable([{ label, count: catalog.length }]);
+  printStatsTable([{ label, count: filtered.length }]);
+  console.log(`\nCache: ${formatCacheStatus(result.cache, noCache)}`);
+}
+
+function assertEqualStrings(actual: string[], expected: string[], label: string): void {
+  if (actual.length !== expected.length) {
+    throw new Error(`${label}: expected ${expected.length} values, got ${actual.length}`);
+  }
+
+  for (let i = 0; i < actual.length; i += 1) {
+    if (actual[i] !== expected[i]) {
+      throw new Error(`${label}: mismatch at index ${i}; expected ${expected[i]}, got ${actual[i]}`);
+    }
+  }
+}
+
+function assertEqualString(actual: string, expected: string, label: string): void {
+  if (actual !== expected) {
+    throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
+function getSelfTests(): SelfTestCase[] {
+  return [
+    {
+      name: "parseTemplateArgs supports sticky gh prefix across spaces",
+      run: () => {
+        assertEqualStrings(parseTemplateArgs(["gh:", "node", "python"]), ["gh:node", "gh:python"], "sticky gh prefix");
+      },
+    },
+    {
+      name: "parseTemplateArgs supports mixed comma and space input",
+      run: () => {
+        assertEqualStrings(parseTemplateArgs(["gh:", "node,python", "go"]), ["gh:node", "gh:python", "gh:go"], "mixed comma and space input");
+      },
+    },
+    {
+      name: "parseTemplateArgs switches sticky prefix when explicit prefix appears",
+      run: () => {
+        assertEqualStrings(parseTemplateArgs(["gh:", "node", "tt:macos", "vscode"]), ["gh:node", "tt:macos", "tt:vscode"], "sticky prefix switching");
+      },
+    },
+    {
+      name: "parseTemplateArgs trims empty comma segments",
+      run: () => {
+        assertEqualStrings(parseTemplateArgs(["gh:", "node,,python", "", "go,"]), ["gh:node", "gh:python", "gh:go"], "empty comma segments");
+      },
+    },
+    {
+      name: "compactIgnoreContent preserves escaped comment lines and collapses blanks",
+      run: () => {
+        const input = "# comment\nfoo\n\n\n\\#literal\n   # another\nbar\n\n";
+        const expected = "foo\n\n\\#literal\nbar\n";
+        assertEqualString(compactIgnoreContent(input), expected, "escaped comments and blank collapse");
+      },
+    },
+    {
+      name: "bash completion contains template stub hook",
+      run: () => {
+        const completion = renderBashCompletion();
+        if (!completion.includes("_gitig_template_stub")) {
+          throw new Error("bash completion is missing _gitig_template_stub");
+        }
+      },
+    },
+    {
+      name: "zsh completion knows check and selftest commands",
+      run: () => {
+        const completion = renderZshCompletion();
+        if (!completion.includes("check selftest")) {
+          throw new Error("zsh completion is missing check/selftest commands");
+        }
+      },
+    },
+  ];
+}
+
+async function cmdSelfTest(): Promise<void> {
+  const tests = getSelfTests();
+  let passed = 0;
+
+  console.log("gitig selftest");
+
+  for (const test of tests) {
+    try {
+      await test.run();
+      console.log(`  OK  ${test.name}`);
+      passed += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`  NO  ${test.name}: ${message}`);
+    }
+  }
+
+  console.log(`\nSummary: ${passed}/${tests.length} checks passed`);
+
+  if (passed !== tests.length) {
+    process.exit(1);
+  }
 }
 
 async function main(): Promise<void> {
   try {
-    const { command, rest, output, force, source, noCache, noComments, detectIncludes } = parseArgs(Bun.argv.slice(2));
+    const { command, rest, output, force, source, noCache, noComments, detectIncludes } = parseArgs(process.argv.slice(2));
 
     switch (command) {
       case "list":
@@ -1621,6 +2011,10 @@ async function main(): Promise<void> {
         return;
       case "stats":
         await cmdStats(source, noCache);
+        return;
+      case "check":
+      case "selftest":
+        await cmdSelfTest();
         return;
       case "completion":
         cmdCompletion(rest[0] ?? "");

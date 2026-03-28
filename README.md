@@ -1,15 +1,15 @@
 # gitig
 
-To install dependencies:
+The ignorant gitignore generator
+
+## Installation
 
 ```bash
-bun install
+npm install -g gitig
 ```
 
-To run:
+## Usage
 
 ```bash
-bun run 
+gitig --help
 ```
-
-This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.

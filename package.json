@@ -1,9 +1,35 @@
 {
   "name": "gitig",
   "version": "1.1.0",
-  "private": true,
+  "description": "A fast CLI for generating, combining, detecting, and compacting .gitignore files.",
   "type": "module",
   "bin": {
-    "gitig": "./gitig.ts"
+    "gitig": "./dist/gitig.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"import('node:fs/promises').then(fs => fs.rm('dist', { recursive: true, force: true }))\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "test": "npm run build && node dist/gitig.js selftest"
+  },
+  "keywords": [
+    "gitignore",
+    "cli",
+    "github",
+    "gitignoreio",
+    "typescript",
+    "node"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
   }
 }
