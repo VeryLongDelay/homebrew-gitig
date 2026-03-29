@@ -112,9 +112,10 @@ gitig compact .gitignore --output .gitignore.clean --force
 gitig license list
 gitig license search apache
 gitig license view mit
+gitig license
 gitig license init mit --fullname "Jane Doe"
-gitig license apache-2.0 --fullname "Jane Doe" --project gitig --projecturl https://example.com --year 2026 --output LICENSE
-gitig license unlicense > LICENSE
+gitig license init apache-2.0 --fullname "Jane Doe" --project gitig --projecturl https://example.com --year 2026 --output LICENSE
+gitig license init unlicense > LICENSE
 
 gitig doctor
 gitig stats

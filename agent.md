@@ -217,7 +217,7 @@ compact
 - `license search <query>` searches slug, title, and SPDX id
 - `license view <license>` prints the raw license body without front matter
 - `license init <license>` writes a rendered `LICENSE` file
-- bare `license <license>` aliases `license init <license>`
+- bare `license` aliases `license list`
 - `license init` supports `--fullname`, `--project`, `--projecturl`, and `--year`
 - `--author` and `--owner` are compatibility aliases for `--fullname`
 - `license init` defaults `--output` to `LICENSE`

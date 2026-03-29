@@ -1,7 +1,7 @@
 {
   "name": "gitig",
-  "version": "1.1.0",
-  "description": "A fast CLI for generating, combining, detecting, and compacting .gitignore files.",
+  "version": "1.0.1",
+  "description": "An ignorant CLI for generating, combining, detecting, and compacting .gitignore files.",
   "type": "module",
   "bin": {
     "gitig": "dist/gitig.js"

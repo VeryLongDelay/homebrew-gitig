@@ -150,7 +150,7 @@ Usage:
     gitig license search <query> [--no-cache]
     gitig license view <license> [--no-cache]
     gitig license init <license> [--output LICENSE] [--fullname name] [--project name] [--projecturl url] [--year yyyy] [--append|-a] [--force]
-    gitig license <license> [--output LICENSE] [--fullname name] [--project name] [--projecturl url] [--year yyyy] [--append|-a] [--force]
+    gitig license
     gitig doctor [--no-cache]
     gitig stats [--source github|gh|ghg|ghc|gitignoreio|tt|all] [--no-cache]
     gitig check
@@ -179,7 +179,7 @@ Examples:
     gitig license search mit
     gitig license view apache-2.0
     gitig license init mit --fullname "Jane Doe"
-    gitig license mit --fullname "Jane Doe"
+    gitig license
 
     gitig compact
     gitig compact .gitignore
@@ -1505,6 +1505,13 @@ function shouldWriteToStdout(outputExplicit: boolean): boolean {
 function resolveLicenseInvocation(rest: string[]): { action: "list" | "search" | "view" | "init"; args: string[] } {
   const first = rest[0]?.trim().toLowerCase();
 
+  if (first === undefined) {
+    return {
+      action: "list",
+      args: [],
+    };
+  }
+
   switch (first) {
     case "list":
     case "search":
@@ -1515,10 +1522,7 @@ function resolveLicenseInvocation(rest: string[]): { action: "list" | "search" |
         args: rest.slice(1),
       };
     default:
-      return {
-        action: "init",
-        args: rest,
-      };
+      throw new Error(`Unknown license subcommand or target: ${rest[0]}. Use "license list", "license search", "license view", or "license init".`);
   }
 }
 
@@ -1635,9 +1639,14 @@ async function cmdDetect(source: SourceName, output: string, outputExplicit: boo
 
 async function cmdLicenseList(noCache: boolean): Promise<void> {
   const catalog = await getLicenseCatalog(noCache);
+  const slugWidth = catalog.reduce((max, entry) => Math.max(max, entry.key.length), "Slug".length);
+  const spdxWidth = catalog.reduce((max, entry) => Math.max(max, (entry.spdxId ?? "-").length), "SPDX".length);
+
+  console.log(`${padRight("Slug", slugWidth)}  ${padRight("SPDX", spdxWidth)}  Title`);
+  console.log(`${"-".repeat(slugWidth)}  ${"-".repeat(spdxWidth)}  -----`);
 
   for (const entry of catalog) {
-    console.log(entry.key);
+    console.log(`${padRight(entry.key, slugWidth)}  ${padRight(entry.spdxId ?? "-", spdxWidth)}  ${entry.title}`);
   }
 }
 
@@ -2454,11 +2463,11 @@ function getSelfTests(): SelfTestCase[] {
       },
     },
     {
-      name: "resolveLicenseInvocation supports implicit init",
+      name: "resolveLicenseInvocation defaults to list",
       run: () => {
-        const resolved = resolveLicenseInvocation(["mit"]);
-        assertEqualString(resolved.action, "init", "license implicit init action");
-        assertEqualStrings(resolved.args, ["mit"], "license implicit init args");
+        const resolved = resolveLicenseInvocation([]);
+        assertEqualString(resolved.action, "list", "license default action");
+        assertEqualStrings(resolved.args, [], "license default args");
       },
     },
     {
