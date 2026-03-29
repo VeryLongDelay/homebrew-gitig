@@ -1,11 +1,12 @@
 # gitig
 
-`gitig` is an ignorant Node-based CLI for generating and managing `.gitignore` files.
+`gitig` is an ignorant Node-based CLI for generating `.gitignore` and `LICENSE` files.
 
 It can:
 
 - fetch templates from `github/gitignore`
 - fetch templates from Toptal `gitignore.io`
+- generate licenses from `github/choosealicense.com`
 - combine multiple templates
 - detect likely templates from the current project
 - strip comments from generated output or existing files
@@ -21,6 +22,7 @@ It can:
 - sticky provider prefixes such as `gh: node python`
 - `--no-comments` / `-nc` support for `view`, `init`, and `detect`
 - `compact` command for existing `.gitignore` files
+- `license` subcommands for listing, searching, viewing, and generating licenses
 
 ## Install
 
@@ -57,6 +59,7 @@ gitig I
 gitig i
 gitig detect
 gitig compact
+gitig license
 gitig doctor
 gitig stats
 gitig completion
@@ -89,6 +92,10 @@ gitig init gh:Node,ghg:macOS --force
 gitig init gh:Node ghg:macOS --force
 gitig I gh:Node ghg:macOS
 gitig i gh:node ghg:macos -nc
+gitig i gh:node > .gitignore
+gitig i gh:node --append -o Makefile
+gitig i gh:node -a -o Makefile
+gitig i gh:node -na -o Makefile
 
 gitig i gh: node python
 gitig i ghg: macos jetbrains
@@ -101,6 +108,13 @@ gitig detect --source ghg --include os,editor -nc --force
 gitig compact
 gitig compact .gitignore
 gitig compact .gitignore --output .gitignore.clean --force
+
+gitig license list
+gitig license search apache
+gitig license view mit
+gitig license init mit --fullname "Jane Doe"
+gitig license apache-2.0 --fullname "Jane Doe" --project gitig --projecturl https://example.com --year 2026 --output LICENSE
+gitig license unlicense > LICENSE
 
 gitig doctor
 gitig stats

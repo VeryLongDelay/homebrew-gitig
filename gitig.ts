@@ -14,7 +14,13 @@ type Args = {
   command?: string;
   rest: string[];
   output: string;
+  outputExplicit: boolean;
   force: boolean;
+  append: boolean;
+  year?: string;
+  fullname?: string;
+  project?: string;
+  projectUrl?: string;
   source: SourceName;
   noCache: boolean;
   noComments: boolean;
@@ -82,17 +88,35 @@ type SelfTestCase = {
   run: () => void | Promise<void>;
 };
 
+type LicenseCatalogEntry = {
+  key: string;
+  path: string;
+  title: string;
+  spdxId?: string;
+  hidden: boolean;
+  aliases: string[];
+};
+
+type LicenseTemplate = {
+  metadata: LicenseCatalogEntry;
+  body: string;
+};
+
 const GITHUB_API_BASE = "https://api.github.com";
 const GITHUB_REPO = "github/gitignore";
 const GITHUB_BRANCH = "main";
 const GITHUB_TREE_URL = `${GITHUB_API_BASE}/repos/${GITHUB_REPO}/git/trees/${GITHUB_BRANCH}?recursive=1`;
 const GITHUB_RAW_BASE = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}`;
 const GITIGNORE_IO_BASE = "https://www.toptal.com/developers/gitignore/api";
+const LICENSE_REPO = "github/choosealicense.com";
+const LICENSE_BRANCH = "gh-pages";
+const LICENSE_TREE_URL = `${GITHUB_API_BASE}/repos/${LICENSE_REPO}/git/trees/${LICENSE_BRANCH}?recursive=1`;
+const LICENSE_RAW_BASE = `https://raw.githubusercontent.com/${LICENSE_REPO}/${LICENSE_BRANCH}`;
 
 const CACHE_DIR = join(homedir(), ".cache", "gitig");
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
 
-const COMMANDS = ["list", "search", "view", "init", "I", "i", "detect", "compact", "doctor", "stats", "check", "selftest", "completion", "install-completion", "help"] as const;
+const COMMANDS = ["list", "search", "view", "init", "I", "i", "detect", "compact", "license", "doctor", "stats", "check", "selftest", "completion", "install-completion", "help"] as const;
 
 const SOURCE_ALIASES = {
   gh: "github",
@@ -117,11 +141,16 @@ Usage:
     gitig list [--source github|gh|ghg|ghc|gitignoreio|tt|all]
     gitig search <query> [--source github|gh|ghg|ghc|gitignoreio|tt|all]
     gitig view <template> [--source github|gh|ghg|ghc|gitignoreio|tt] [--no-comments|-nc]
-    gitig init <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--force] [--no-comments|-nc]
-    gitig I <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--force] [--no-comments|-nc]
-    gitig i <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--force] [--no-comments|-nc]
-    gitig detect [--source github|gh|ghg|gitignoreio|tt] [--include os,editor] [--output .gitignore] [--force] [--no-comments|-nc]
+    gitig init <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
+    gitig I <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
+    gitig i <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
+    gitig detect [--source github|gh|ghg|gitignoreio|tt] [--include os,editor] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
     gitig compact [input] [--output file] [--force]
+    gitig license list [--no-cache]
+    gitig license search <query> [--no-cache]
+    gitig license view <license> [--no-cache]
+    gitig license init <license> [--output LICENSE] [--fullname name] [--project name] [--projecturl url] [--year yyyy] [--append|-a] [--force]
+    gitig license <license> [--output LICENSE] [--fullname name] [--project name] [--projecturl url] [--year yyyy] [--append|-a] [--force]
     gitig doctor [--no-cache]
     gitig stats [--source github|gh|ghg|ghc|gitignoreio|tt|all] [--no-cache]
     gitig check
@@ -146,10 +175,25 @@ Examples:
     gitig i tt: node macos vscode
 
     gitig detect --source gh --include os,editor -nc --force
+    gitig license list
+    gitig license search mit
+    gitig license view apache-2.0
+    gitig license init mit --fullname "Jane Doe"
+    gitig license mit --fullname "Jane Doe"
 
     gitig compact
     gitig compact .gitignore
     gitig compact .gitignore --output .gitignore.clean --force
+
+Flags:
+    --output, -o     Output path for init/detect/compact (default: .gitignore)
+    --append, -a     Append to the output file and dedupe immediately
+    -na              Append with comments stripped
+    --fullname       Replacement for [fullname]
+    --project        Replacement for [project]
+    --projecturl     Replacement for [projecturl]
+    --year           Replacement for [year] (default: current year)
+    --force, -f      Overwrite output files without prompting
 `.trim(),
   );
 }
@@ -249,7 +293,13 @@ function parseDetectIncludes(value: string): DetectInclude[] {
 function parseArgs(argv: string[]): Args {
   const args = [...argv];
   let output = ".gitignore";
+  let outputExplicit = false;
   let force = false;
+  let append = false;
+  let year: string | undefined;
+  let fullname: string | undefined;
+  let project: string | undefined;
+  let projectUrl: string | undefined;
   let source: SourceName | undefined;
   let noCache = false;
   let noComments = false;
@@ -265,12 +315,64 @@ function parseArgs(argv: string[]): Args {
         throw new Error("Missing value for --output");
       }
       output = next;
+      outputExplicit = true;
       i += 1;
       continue;
     }
 
     if (arg === "--force" || arg === "-f") {
       force = true;
+      continue;
+    }
+
+    if (arg === "--fullname" || arg === "--author" || arg === "--owner") {
+      const next = args[i + 1];
+      if (typeof next !== "string" || next.trim().length === 0) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+      fullname = next.trim();
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--project") {
+      const next = args[i + 1];
+      if (typeof next !== "string" || next.trim().length === 0) {
+        throw new Error("Missing value for --project");
+      }
+      project = next.trim();
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--projecturl" || arg === "--project-url") {
+      const next = args[i + 1];
+      if (typeof next !== "string" || next.trim().length === 0) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+      projectUrl = next.trim();
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--year") {
+      const next = args[i + 1];
+      if (typeof next !== "string" || next.trim().length === 0) {
+        throw new Error("Missing value for --year");
+      }
+      year = next.trim();
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--append" || arg === "-a") {
+      append = true;
+      continue;
+    }
+
+    if (arg === "-na") {
+      append = true;
+      noComments = true;
       continue;
     }
 
@@ -314,7 +416,13 @@ function parseArgs(argv: string[]): Args {
     command,
     rest,
     output,
+    outputExplicit,
     force,
+    append,
+    year,
+    fullname,
+    project,
+    projectUrl,
     source: source ?? defaultSourceForCommand(command),
     noCache,
     noComments,
@@ -582,6 +690,175 @@ async function getGitHubCatalog(noCache: boolean): Promise<CatalogEntry[]> {
 
 async function getGitignoreIoCatalog(noCache: boolean): Promise<CatalogEntry[]> {
   return (await getGitignoreIoCatalogWithCache(noCache)).catalog;
+}
+
+function parseFrontMatter(content: string): { metadata: Record<string, string>; body: string } {
+  const normalized = content.replace(/\r\n/g, "\n");
+
+  if (!normalized.startsWith("---\n")) {
+    return { metadata: {}, body: normalized };
+  }
+
+  const endIndex = normalized.indexOf("\n---\n", 4);
+  if (endIndex < 0) {
+    return { metadata: {}, body: normalized };
+  }
+
+  const frontMatter = normalized.slice(4, endIndex);
+  const body = normalized.slice(endIndex + 5);
+  const metadata: Record<string, string> = {};
+
+  for (const line of frontMatter.split("\n")) {
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    if (match === null) {
+      continue;
+    }
+    metadata[match[1].toLowerCase()] = match[2].trim();
+  }
+
+  return { metadata, body };
+}
+
+function createLicenseAliases(slug: string, title: string, spdxId?: string): string[] {
+  const aliases = [slug, title];
+  if (spdxId !== undefined && spdxId.length > 0) {
+    aliases.push(spdxId);
+  }
+  return uniqueSorted(aliases);
+}
+
+function buildLicenseCatalogEntry(path: string, content: string): LicenseCatalogEntry {
+  const slug = path.replace(/^_licenses\//, "").replace(/\.txt$/i, "");
+  const parsed = parseFrontMatter(content);
+  const title = parsed.metadata.title ?? slug;
+  const spdxId = parsed.metadata["spdx-id"];
+  const hidden = parsed.metadata.hidden === "true";
+
+  return {
+    key: slug,
+    path,
+    title,
+    spdxId,
+    hidden,
+    aliases: createLicenseAliases(slug, title, spdxId),
+  };
+}
+
+async function getLicenseCatalog(noCache: boolean): Promise<LicenseCatalogEntry[]> {
+  const cachePath = cachePathFor("license-catalog");
+
+  if (!noCache) {
+    const cached = await readCacheJson<LicenseCatalogEntry[]>(cachePath);
+    if (cached !== null) {
+      return cached.filter((entry) => !entry.hidden);
+    }
+  }
+
+  const tree = await fetchJson<GitHubTreeResponse>(LICENSE_TREE_URL);
+  const licensePaths = tree.tree
+    .filter((item) => item.type === "blob" && item.path.startsWith("_licenses/") && item.path.endsWith(".txt"))
+    .map((item) => item.path)
+    .sort((a, b) => a.localeCompare(b));
+
+  const catalog = (
+    await Promise.all(
+      licensePaths.map(async (path) => {
+        const content = await fetchText(`${LICENSE_RAW_BASE}/${path}`);
+        return buildLicenseCatalogEntry(path, content);
+      }),
+    )
+  ).sort((a, b) => a.key.localeCompare(b.key));
+
+  if (!noCache) {
+    await writeCacheJson(cachePath, catalog);
+  }
+
+  return catalog.filter((entry) => !entry.hidden);
+}
+
+function resolveLicenseEntry(name: string, catalog: LicenseCatalogEntry[]): LicenseCatalogEntry | null {
+  const raw = normalizeText(name);
+  const loose = normalizeLoose(name);
+
+  const exact = catalog.find((entry) => entry.key === raw || entry.title === raw || entry.spdxId === raw);
+  if (exact !== undefined) {
+    return exact;
+  }
+
+  const lower = raw.toLowerCase();
+  const caseInsensitive = catalog.find((entry) => entry.key.toLowerCase() === lower || entry.title.toLowerCase() === lower || entry.spdxId?.toLowerCase() === lower);
+  if (caseInsensitive !== undefined) {
+    return caseInsensitive;
+  }
+
+  return catalog.find((entry) => entry.aliases.some((alias) => normalizeLoose(alias) === loose)) ?? null;
+}
+
+function formatLicenseSuggestions(query: string, catalog: LicenseCatalogEntry[]): string {
+  const q = normalizeLoose(query);
+  const suggestions = catalog
+    .map((entry) => {
+      const score = Math.min(...entry.aliases.map((alias) => {
+        const candidate = normalizeLoose(alias);
+        if (candidate.includes(q) || q.includes(candidate)) {
+          return 0;
+        }
+        return levenshtein(q, candidate);
+      }));
+
+      return { entry, score };
+    })
+    .sort((a, b) => a.score - b.score || a.entry.key.localeCompare(b.entry.key))
+    .slice(0, 5)
+    .map((item) => item.entry.key);
+
+  if (suggestions.length === 0) {
+    return "";
+  }
+
+  return `Did you mean:\n${suggestions.map((item) => `  - ${item}`).join("\n")}`;
+}
+
+async function getLicenseTemplate(entry: LicenseCatalogEntry): Promise<LicenseTemplate> {
+  const content = await fetchText(`${LICENSE_RAW_BASE}/${entry.path}`);
+  const parsed = parseFrontMatter(content);
+
+  return {
+    metadata: buildLicenseCatalogEntry(entry.path, content),
+    body: parsed.body.endsWith("\n") ? parsed.body : `${parsed.body}\n`,
+  };
+}
+
+function applyLicensePlaceholders(
+  content: string,
+  values: {
+    year: string;
+    fullname?: string;
+    project?: string;
+    projectUrl?: string;
+  },
+): string {
+  let output = content;
+
+  output = output.replace(/\[(?:year|yyyy)\]/gi, values.year);
+  output = output.replace(/<year>/gi, values.year);
+
+  if (values.fullname !== undefined && values.fullname.length > 0) {
+    output = output.replace(/\[(?:fullname|name of copyright owner|name of author|copyright holders?)\]/gi, values.fullname);
+    output = output.replace(/<fullname>/gi, values.fullname);
+  }
+
+  if (values.project !== undefined && values.project.length > 0) {
+    output = output.replace(/\[project\]/gi, values.project);
+    output = output.replace(/<project>/gi, values.project);
+  }
+
+  if (values.projectUrl !== undefined && values.projectUrl.length > 0) {
+    output = output.replace(/\[(?:projecturl|project-url)\]/gi, values.projectUrl);
+    output = output.replace(/<(?:projecturl|project-url)>/gi, values.projectUrl);
+  }
+
+  return output;
 }
 
 function filterGitHubCatalogByScope(catalog: CatalogEntry[], scope: GitHubScope): CatalogEntry[] {
@@ -894,10 +1171,6 @@ function compactIgnoreContent(content: string): string {
   return kept.length > 0 ? `${kept.join("\n")}\n` : "";
 }
 
-function stripCommentLines(content: string): string {
-  return compactIgnoreContent(content);
-}
-
 function applyNoComments(content: string, noComments: boolean): string {
   return noComments ? compactIgnoreContent(content) : content;
 }
@@ -915,6 +1188,119 @@ function dedupeLines(content: string): string {
   }
 
   return `${output.join("\n").replace(/\n*$/, "\n")}`;
+}
+
+function mergeAppendedContent(existing: string, content: string): string {
+  const separator = existing.endsWith("\n") || existing.length === 0 || content.length === 0 ? "" : "\n";
+  return dedupeLines(`${existing}${separator}${content}`);
+}
+
+async function buildInitContent(rawNames: string[], source: SourceName, noCache: boolean, noComments: boolean): Promise<string> {
+  const requestedNames = parseTemplateArgs(rawNames);
+
+  if (requestedNames.length === 0) {
+    throw new Error("Please provide at least one template name");
+  }
+
+  const effectiveSources = uniqueSorted(
+    requestedNames.map((requestedName) => {
+      const parsed = parseProviderPrefix(requestedName);
+
+      if (parsed.provider === undefined) {
+        return assertSingleSource(source, "init");
+      }
+
+      if (parsed.provider === "gitignoreio") {
+        return "gitignoreio";
+      }
+
+      if (parsed.githubScope === "global") {
+        return "github-global";
+      }
+
+      if (parsed.githubScope === "community") {
+        return "github-community";
+      }
+
+      return "github";
+    }),
+  );
+
+  const hasGitHub = effectiveSources.some((item) => item.startsWith("github"));
+  const hasGitignoreIo = effectiveSources.includes("gitignoreio");
+
+  if (hasGitHub && hasGitignoreIo) {
+    throw new Error("init cannot mix GitHub templates and gitignore.io templates in one command");
+  }
+
+  const effectiveSource = effectiveSources[0];
+  if (effectiveSource === undefined) {
+    throw new Error("Could not determine source for init");
+  }
+
+  const catalog = await getCatalog(effectiveSource as SourceName, noCache);
+  const resolved: CatalogEntry[] = [];
+
+  for (const requestedName of requestedNames) {
+    const entry = resolveEntry(requestedName, catalog);
+    if (entry === null) {
+      console.error(`Template not found: ${requestedName}`);
+      const suggestions = formatSuggestions(requestedName, catalog);
+      if (suggestions.length > 0) {
+        console.error(suggestions);
+      }
+      process.exit(1);
+    }
+    resolved.push(entry);
+  }
+
+  if (resolved[0]?.source === "github") {
+    const parts: string[] = [];
+
+    for (const entry of resolved) {
+      const section = await getGitHubTemplateContent(entry.key);
+      const cleanedSection = applyNoComments(section, noComments).trimEnd();
+
+      if (cleanedSection.length === 0) {
+        continue;
+      }
+
+      if (noComments) {
+        parts.push(cleanedSection);
+      } else {
+        parts.push(`# --- ${entry.displayName} ---\n${cleanedSection}`);
+      }
+    }
+
+    return parts.length > 0 ? `${parts.join("\n\n")}\n` : "";
+  }
+
+  const keys = resolved.map((entry) => entry.key);
+  const generated = await getGitignoreIoTemplateContent(keys);
+  return applyNoComments(dedupeLines(generated), noComments);
+}
+
+async function writeGeneratedContent(output: string, content: string, force: boolean, append: boolean): Promise<void> {
+  const exists = await pathExists(output);
+
+  if (append) {
+    if (!exists) {
+      await writeFile(output, content, "utf8");
+      return;
+    }
+
+    const existing = await readFile(output, "utf8");
+    const merged = mergeAppendedContent(existing, content);
+    await writeFile(output, merged, "utf8");
+    return;
+  }
+
+  if (exists && !force) {
+    console.error(`${output} already exists. Use --force to overwrite.`);
+    process.exit(1);
+  }
+
+  await writeFile(output, content, "utf8");
 }
 
 function displayNameForSource(entry: CatalogEntry, source: SourceName): string {
@@ -1112,6 +1498,30 @@ function parseTemplateArgs(parts: string[]): string[] {
   return expanded;
 }
 
+function shouldWriteToStdout(outputExplicit: boolean): boolean {
+  return !outputExplicit && !process.stdout.isTTY;
+}
+
+function resolveLicenseInvocation(rest: string[]): { action: "list" | "search" | "view" | "init"; args: string[] } {
+  const first = rest[0]?.trim().toLowerCase();
+
+  switch (first) {
+    case "list":
+    case "search":
+    case "view":
+    case "init":
+      return {
+        action: first,
+        args: rest.slice(1),
+      };
+    default:
+      return {
+        action: "init",
+        args: rest,
+      };
+  }
+}
+
 async function cmdList(source: SourceName, noCache: boolean): Promise<void> {
   const catalog = await getCatalog(source, noCache);
 
@@ -1187,102 +1597,22 @@ async function cmdView(name: string, source: SourceName, noCache: boolean, noCom
   process.stdout.write(content.endsWith("\n") ? content : `${content}\n`);
 }
 
-async function cmdInit(rawNames: string[], source: SourceName, output: string, force: boolean, noCache: boolean, noComments: boolean): Promise<void> {
-  const requestedNames = parseTemplateArgs(rawNames);
+async function cmdInit(rawNames: string[], source: SourceName, output: string, outputExplicit: boolean, force: boolean, append: boolean, noCache: boolean, noComments: boolean): Promise<void> {
+  const content = await buildInitContent(rawNames, source, noCache, noComments);
 
-  if (requestedNames.length === 0) {
-    throw new Error("Please provide at least one template name");
+  if (shouldWriteToStdout(outputExplicit)) {
+    process.stdout.write(content);
+    return;
   }
 
-  if ((await pathExists(output)) && !force) {
-    console.error(`${output} already exists. Use --force to overwrite.`);
-    process.exit(1);
+  await writeGeneratedContent(output, content, force, append);
+
+  if (process.stdout.isTTY) {
+    console.log(append ? `Updated ${output}` : `Wrote ${output}`);
   }
-
-  const effectiveSources = uniqueSorted(
-    requestedNames.map((requestedName) => {
-      const parsed = parseProviderPrefix(requestedName);
-
-      if (parsed.provider === undefined) {
-        return assertSingleSource(source, "init");
-      }
-
-      if (parsed.provider === "gitignoreio") {
-        return "gitignoreio";
-      }
-
-      if (parsed.githubScope === "global") {
-        return "github-global";
-      }
-
-      if (parsed.githubScope === "community") {
-        return "github-community";
-      }
-
-      return "github";
-    }),
-  );
-
-  const hasGitHub = effectiveSources.some((item) => item.startsWith("github"));
-  const hasGitignoreIo = effectiveSources.includes("gitignoreio");
-
-  if (hasGitHub && hasGitignoreIo) {
-    throw new Error("init cannot mix GitHub templates and gitignore.io templates in one command");
-  }
-
-  const effectiveSource = effectiveSources[0];
-  if (effectiveSource === undefined) {
-    throw new Error("Could not determine source for init");
-  }
-
-  const catalog = await getCatalog(effectiveSource as SourceName, noCache);
-  const resolved: CatalogEntry[] = [];
-
-  for (const requestedName of requestedNames) {
-    const entry = resolveEntry(requestedName, catalog);
-    if (entry === null) {
-      console.error(`Template not found: ${requestedName}`);
-      const suggestions = formatSuggestions(requestedName, catalog);
-      if (suggestions.length > 0) {
-        console.error(suggestions);
-      }
-      process.exit(1);
-    }
-    resolved.push(entry);
-  }
-
-  let content = "";
-
-  if (resolved[0]?.source === "github") {
-    const parts: string[] = [];
-
-    for (const entry of resolved) {
-      const section = await getGitHubTemplateContent(entry.key);
-      const cleanedSection = applyNoComments(section, noComments).trimEnd();
-
-      if (cleanedSection.length === 0) {
-        continue;
-      }
-
-      if (noComments) {
-        parts.push(cleanedSection);
-      } else {
-        parts.push(`# --- ${entry.displayName} ---\n${cleanedSection}`);
-      }
-    }
-
-    content = parts.length > 0 ? `${parts.join("\n\n")}\n` : "";
-  } else {
-    const keys = resolved.map((entry) => entry.key);
-    const generated = await getGitignoreIoTemplateContent(keys);
-    content = applyNoComments(dedupeLines(generated), noComments);
-  }
-
-  await writeFile(output, content, "utf8");
-  console.log(`Wrote ${output}`);
 }
 
-async function cmdDetect(source: SourceName, output: string, force: boolean, noCache: boolean, includes: DetectInclude[], noComments: boolean): Promise<void> {
+async function cmdDetect(source: SourceName, output: string, outputExplicit: boolean, force: boolean, append: boolean, noCache: boolean, includes: DetectInclude[], noComments: boolean): Promise<void> {
   const effectiveSource = assertSingleSource(source, "detect");
 
   if (effectiveSource === "github-community") {
@@ -1296,8 +1626,107 @@ async function cmdDetect(source: SourceName, output: string, force: boolean, noC
     process.exit(1);
   }
 
-  console.log(`Detected templates: ${detected.join(", ")}`);
-  await cmdInit(detected, effectiveSource, output, force, noCache, noComments);
+  if (process.stdout.isTTY || outputExplicit) {
+    console.log(`Detected templates: ${detected.join(", ")}`);
+  }
+
+  await cmdInit(detected, effectiveSource, output, outputExplicit, force, append, noCache, noComments);
+}
+
+async function cmdLicenseList(noCache: boolean): Promise<void> {
+  const catalog = await getLicenseCatalog(noCache);
+
+  for (const entry of catalog) {
+    console.log(entry.key);
+  }
+}
+
+async function cmdLicenseSearch(query: string, noCache: boolean): Promise<void> {
+  const q = query.trim();
+  if (q.length === 0) {
+    throw new Error("Please provide a search query");
+  }
+
+  const qLoose = normalizeLoose(q);
+  const catalog = await getLicenseCatalog(noCache);
+  const matches = catalog.filter((entry) => entry.aliases.some((alias) => normalizeLoose(alias).includes(qLoose)));
+
+  if (matches.length === 0) {
+    console.error(`No licenses found for "${query}"`);
+    const suggestions = formatLicenseSuggestions(query, catalog);
+    if (suggestions.length > 0) {
+      console.error(suggestions);
+    }
+    process.exit(1);
+  }
+
+  for (const entry of matches) {
+    const label = entry.spdxId !== undefined ? `${entry.key}\t[${entry.spdxId}]` : entry.key;
+    console.log(`${label}\t${entry.title}`);
+  }
+}
+
+async function cmdLicenseView(name: string, noCache: boolean): Promise<void> {
+  const catalog = await getLicenseCatalog(noCache);
+  const entry = resolveLicenseEntry(name, catalog);
+
+  if (entry === null) {
+    console.error(`License not found: ${name}`);
+    const suggestions = formatLicenseSuggestions(name, catalog);
+    if (suggestions.length > 0) {
+      console.error(suggestions);
+    }
+    process.exit(1);
+  }
+
+  const license = await getLicenseTemplate(entry);
+  process.stdout.write(license.body.endsWith("\n") ? license.body : `${license.body}\n`);
+}
+
+async function cmdLicenseInit(
+  name: string,
+  output: string,
+  outputExplicit: boolean,
+  force: boolean,
+  append: boolean,
+  noCache: boolean,
+  values: {
+    year?: string;
+    fullname?: string;
+    project?: string;
+    projectUrl?: string;
+  },
+): Promise<void> {
+  const catalog = await getLicenseCatalog(noCache);
+  const entry = resolveLicenseEntry(name, catalog);
+
+  if (entry === null) {
+    console.error(`License not found: ${name}`);
+    const suggestions = formatLicenseSuggestions(name, catalog);
+    if (suggestions.length > 0) {
+      console.error(suggestions);
+    }
+    process.exit(1);
+  }
+
+  const template = await getLicenseTemplate(entry);
+  const rendered = applyLicensePlaceholders(template.body, {
+    year: values.year ?? String(new Date().getFullYear()),
+    fullname: values.fullname,
+    project: values.project,
+    projectUrl: values.projectUrl,
+  });
+
+  if (shouldWriteToStdout(outputExplicit)) {
+    process.stdout.write(rendered);
+    return;
+  }
+
+  await writeGeneratedContent(output, rendered, force, append);
+
+  if (process.stdout.isTTY) {
+    console.log(append ? `Updated ${output}` : `Wrote ${output}`);
+  }
 }
 
 async function cmdCompact(inputPath: string | undefined, outputPath: string, force: boolean): Promise<void> {
@@ -1328,9 +1757,11 @@ _gitig_detect_sources="${DETECT_SOURCE_VALUES.join(" ")}"
 _gitig_include_values="${INCLUDE_VALUE_SUGGESTIONS.join(" ")}"
 _gitig_shells="${SHELLS.join(" ")}"
 _gitig_common_flags="--source -s --no-cache"
-_gitig_mutating_flags="--output -o --force -f --no-cache --no-comments -nc"
-_gitig_detect_flags="--source -s --include --output -o --force -f --no-cache --no-comments -nc"
+_gitig_mutating_flags="--output -o --append -a -na --force -f --no-cache --no-comments -nc"
+_gitig_detect_flags="--source -s --include --output -o --append -a -na --force -f --no-cache --no-comments -nc"
 _gitig_compact_flags="--output -o --force -f"
+_gitig_license_subcommands="list search view init"
+_gitig_license_init_flags="--output -o --append -a --fullname --author --owner --project --projecturl --project-url --year --force -f --no-cache"
 _gitig_doctor_flags="--no-cache"
 
 _gitig_template_stub() {
@@ -1352,6 +1783,9 @@ _gitig_template_stub() {
             ;;
         shell)
             COMPREPLY=( $(compgen -W "$_gitig_shells" -- "$cur") )
+            ;;
+        license-subcommand)
+            COMPREPLY=( $(compgen -W "$_gitig_license_subcommands" -- "$cur") )
             ;;
         template)
             COMPREPLY=( )
@@ -1426,6 +1860,36 @@ _gitig_completion() {
             _gitig_template_stub "$cur" template
             return
             ;;
+        license)
+            if [[ $cword -eq 2 ]]; then
+                _gitig_template_stub "$cur" license-subcommand
+                return
+            fi
+
+            case "\${words[2]}" in
+                list|search)
+                    COMPREPLY=( $(compgen -W "$_gitig_doctor_flags" -- "$cur") )
+                    return
+                    ;;
+                view)
+                    return
+                    ;;
+                init)
+                    if [[ "$cur" == --* || "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "$_gitig_license_init_flags" -- "$cur") )
+                        return
+                    fi
+                    return
+                    ;;
+                *)
+                    if [[ "$cur" == --* || "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "$_gitig_license_init_flags" -- "$cur") )
+                        return
+                    fi
+                    return
+                    ;;
+            esac
+            ;;
     esac
 }
 
@@ -1441,13 +1905,15 @@ local -a _gitig_all_sources
 local -a _gitig_single_sources
 local -a _gitig_detect_sources
 local -a _gitig_include_values
+local -a _gitig_license_subcommands
 local -a _gitig_shells
 
-_gitig_commands=(list search view init I i detect compact doctor stats check selftest completion install-completion help)
+_gitig_commands=(list search view init I i detect compact license doctor stats check selftest completion install-completion help)
 _gitig_all_sources=(github gh ghg ghc gitignoreio tt all)
 _gitig_single_sources=(github gh ghg ghc gitignoreio tt)
 _gitig_detect_sources=(github gh ghg gitignoreio tt)
 _gitig_include_values=(os editor os,editor)
+_gitig_license_subcommands=(list search view init)
 _gitig_shells=(bash zsh fish)
 
 _gitig_template_stub() {
@@ -1459,6 +1925,9 @@ _gitig_template_stub() {
             ;;
         include)
             _describe -t includes 'includes' _gitig_include_values
+            ;;
+        license-subcommand)
+            _describe -t commands 'license commands' _gitig_license_subcommands
             ;;
         detect-source)
             _describe -t sources 'sources' _gitig_detect_sources
@@ -1485,6 +1954,16 @@ _gitig() {
         '--include[extra detect categories]:include:->include' \
         '--output[output file]:file:_files' \
         '-o[output file]:file:_files' \
+        '--append[append to the output file and dedupe immediately]' \
+        '-a[append to the output file and dedupe immediately]' \
+        '-na[append with full-line comments stripped]' \
+        '--fullname[replacement for [fullname]]:fullname:' \
+        '--author[alias for --fullname]:fullname:' \
+        '--owner[alias for --fullname]:fullname:' \
+        '--project[replacement for [project]]:project:' \
+        '--projecturl[replacement for [projecturl]]:project-url:' \
+        '--project-url[replacement for [projecturl]]:project-url:' \
+        '--year[copyright year for license templates]:year:' \
         '--force[overwrite output file]' \
         '-f[overwrite output file]' \
         '--no-cache[disable catalog cache]' \
@@ -1523,6 +2002,19 @@ _gitig() {
                 view|init|I|i|detect)
                     _gitig_template_stub template
                     ;;
+                license)
+                    case "$words[3]" in
+                        view|init)
+                            _gitig_template_stub template
+                            ;;
+                        "")
+                            _gitig_template_stub license-subcommand
+                            ;;
+                        *)
+                            _files
+                            ;;
+                    esac
+                    ;;
                 *)
                     _files
                     ;;
@@ -1538,21 +2030,37 @@ _gitig "$@"
 
 function renderFishCompletion(): string {
   return String.raw`complete -c gitig -f
-complete -c gitig -n "__fish_use_subcommand" -a "list search view init I i detect compact doctor stats check selftest completion install-completion help"
+complete -c gitig -n "__fish_use_subcommand" -a "list search view init I i detect compact license doctor stats check selftest completion install-completion help"
 complete -c gitig -n "__fish_seen_subcommand_from completion install-completion" -a "bash zsh fish"
 complete -c gitig -n "__fish_seen_subcommand_from list search stats" -l source -s s -a "github gh ghg ghc gitignoreio tt all"
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l source -s s -a "github gh ghg gitignoreio tt"
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l include -a "os editor os,editor"
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l append -s a
+complete -c gitig -n "__fish_seen_subcommand_from detect" -s na
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l force -s f
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l no-cache
 complete -c gitig -n "__fish_seen_subcommand_from detect" -l no-comments
 complete -c gitig -n "__fish_seen_subcommand_from detect" -s nc
 complete -c gitig -n "__fish_seen_subcommand_from compact" -l output -s o -r
 complete -c gitig -n "__fish_seen_subcommand_from compact" -l force -s f
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -eq 2" -a "list search view init"
+complete -c gitig -n "__fish_seen_subcommand_from license; and __fish_seen_subcommand_from list search view init doctor check selftest" -l no-cache
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l append -s a
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l fullname -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l author -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l owner -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l project -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l projecturl -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l project-url -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l year -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l force -s f
 complete -c gitig -n "__fish_seen_subcommand_from doctor check selftest" -l no-cache
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l source -s s -a "github gh ghg ghc gitignoreio tt"
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l append -s a
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -s na
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l force -s f
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l no-cache
 complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l no-comments
@@ -1911,6 +2419,55 @@ function getSelfTests(): SelfTestCase[] {
       },
     },
     {
+      name: "parseArgs recognizes append flags",
+      run: () => {
+        const parsed = parseArgs(["init", "gh:Node", "--append", "-o", "Makefile"]);
+        assertEqualString(String(parsed.append), "true", "append flag");
+        assertEqualString(String(parsed.outputExplicit), "true", "output explicit flag");
+        assertEqualString(parsed.output, "Makefile", "append output path");
+      },
+    },
+    {
+      name: "parseArgs recognizes -na as append without comments",
+      run: () => {
+        const parsed = parseArgs(["init", "gh:Node", "-na"]);
+        assertEqualString(String(parsed.append), "true", "append shorthand");
+        assertEqualString(String(parsed.noComments), "true", "no comments shorthand");
+      },
+    },
+    {
+      name: "parseArgs recognizes license fullname, project, and year",
+      run: () => {
+        const parsed = parseArgs(["license", "init", "mit", "--fullname", "Jane Doe", "--project", "gitig", "--year", "2026"]);
+        assertEqualString(parsed.fullname ?? "", "Jane Doe", "license fullname");
+        assertEqualString(parsed.project ?? "", "gitig", "license project");
+        assertEqualString(parsed.year ?? "", "2026", "license year");
+      },
+    },
+    {
+      name: "parseArgs keeps --author and --owner as fullname aliases",
+      run: () => {
+        const authorParsed = parseArgs(["license", "mit", "--author", "Jane Doe"]);
+        const ownerParsed = parseArgs(["license", "mit", "--owner", "Jane Doe"]);
+        assertEqualString(authorParsed.fullname ?? "", "Jane Doe", "license author alias");
+        assertEqualString(ownerParsed.fullname ?? "", "Jane Doe", "license owner alias");
+      },
+    },
+    {
+      name: "resolveLicenseInvocation supports implicit init",
+      run: () => {
+        const resolved = resolveLicenseInvocation(["mit"]);
+        assertEqualString(resolved.action, "init", "license implicit init action");
+        assertEqualStrings(resolved.args, ["mit"], "license implicit init args");
+      },
+    },
+    {
+      name: "mergeAppendedContent dedupes repeated lines",
+      run: () => {
+        assertEqualString(mergeAppendedContent("a\nb\n", "b\nc\n"), "a\nb\nc\n", "append dedupe");
+      },
+    },
+    {
       name: "parseTemplateArgs trims empty comma segments",
       run: () => {
         assertEqualStrings(parseTemplateArgs(["gh:", "node,,python", "", "go,"]), ["gh:node", "gh:python", "gh:go"], "empty comma segments");
@@ -1922,6 +2479,26 @@ function getSelfTests(): SelfTestCase[] {
         const input = "# comment\nfoo\n\n\n\\#literal\n   # another\nbar\n\n";
         const expected = "foo\n\n\\#literal\nbar\n";
         assertEqualString(compactIgnoreContent(input), expected, "escaped comments and blank collapse");
+      },
+    },
+    {
+      name: "parseFrontMatter extracts title and body",
+      run: () => {
+        const parsed = parseFrontMatter("---\ntitle: MIT License\nspdx-id: MIT\nhidden: false\n---\nBody\n");
+        assertEqualString(parsed.metadata.title ?? "", "MIT License", "front matter title");
+        assertEqualString(parsed.body, "Body\n", "front matter body");
+      },
+    },
+    {
+      name: "applyLicensePlaceholders replaces known license tokens",
+      run: () => {
+        const rendered = applyLicensePlaceholders("Copyright [year] [fullname]\n[project]\n[projecturl]\n", {
+          year: "2026",
+          fullname: "Jane Doe",
+          project: "gitig",
+          projectUrl: "https://example.com/gitig",
+        });
+        assertEqualString(rendered, "Copyright 2026 Jane Doe\ngitig\nhttps://example.com/gitig\n", "license placeholders");
       },
     },
     {
@@ -1939,6 +2516,15 @@ function getSelfTests(): SelfTestCase[] {
         const completion = renderZshCompletion();
         if (!completion.includes("check selftest")) {
           throw new Error("zsh completion is missing check/selftest commands");
+        }
+      },
+    },
+    {
+      name: "completion exposes license commands",
+      run: () => {
+        const completion = renderFishCompletion();
+        if (!completion.includes("license doctor")) {
+          throw new Error("fish completion is missing license command");
         }
       },
     },
@@ -1971,7 +2557,7 @@ async function cmdSelfTest(): Promise<void> {
 
 async function main(): Promise<void> {
   try {
-    const { command, rest, output, force, source, noCache, noComments, detectIncludes } = parseArgs(process.argv.slice(2));
+    const { command, rest, output, outputExplicit, force, append, year, fullname, project, projectUrl, source, noCache, noComments, detectIncludes } = parseArgs(process.argv.slice(2));
 
     switch (command) {
       case "list":
@@ -1986,14 +2572,42 @@ async function main(): Promise<void> {
       case "init":
       case "I":
       case "i":
-        await cmdInit(rest, source, output, force, noCache, noComments);
+        await cmdInit(rest, source, output, outputExplicit, force, append, noCache, noComments);
         return;
       case "detect":
-        await cmdDetect(source, output, force, noCache, detectIncludes, noComments);
+        await cmdDetect(source, output, outputExplicit, force, append, noCache, detectIncludes, noComments);
         return;
       case "compact":
         await cmdCompact(rest[0], output, force);
         return;
+      case "license": {
+        const license = resolveLicenseInvocation(rest);
+
+        switch (license.action) {
+          case "list":
+            await cmdLicenseList(noCache);
+            return;
+          case "search":
+            await cmdLicenseSearch(license.args.join(" "), noCache);
+            return;
+          case "view":
+            await cmdLicenseView(license.args.join(" "), noCache);
+            return;
+          case "init":
+            await cmdLicenseInit(license.args.join(" "), outputExplicit ? output : "LICENSE", outputExplicit, force, append, noCache, {
+              year,
+              fullname,
+              project,
+              projectUrl,
+            });
+            return;
+        }
+      }
+      case "license-init":
+      case "license-list":
+      case "license-search":
+      case "license-view":
+        throw new Error(`Use "license ${command.replace("license-", "")}" instead of "${command}"`);
       case "doctor":
         await cmdDoctor(noCache);
         return;
