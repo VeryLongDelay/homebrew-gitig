@@ -87,6 +87,8 @@ gitig view ghg:macOS
 gitig view ghc:Python/Poetry
 gitig view tt:node
 gitig view gh:Node -nc
+gitig gh:Node
+gitig gh:Node -nc
 
 gitig init gh:Node,ghg:macOS --force
 gitig init gh:Node ghg:macOS --force
@@ -96,6 +98,7 @@ gitig i gh:node > .gitignore
 gitig i gh:node --append -o Makefile
 gitig i gh:node -a -o Makefile
 gitig i gh:node -na -o Makefile
+gitig i gh:node -anc -o Makefile
 
 gitig i gh: node python
 gitig i ghg: macos jetbrains
@@ -106,6 +109,7 @@ gitig detect --source gh --include os,editor --force
 gitig detect --source ghg --include os,editor -nc --force
 
 gitig compact
+gitig -c
 gitig compact .gitignore
 gitig compact .gitignore --output .gitignore.clean --force
 

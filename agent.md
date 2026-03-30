@@ -60,6 +60,7 @@ Supported commands:
 list
 search
 view
+bare template args (prints generated `.gitignore` to stdout)
 init (aliases: I, i)
 detect
 compact
@@ -142,6 +143,15 @@ ghg:macos
 ghc:python/poetry
 ```
 
+### Bare generation
+
+```bash
+gitig gh:Node
+gitig gh:Node -nc
+```
+
+Behaves like a stdout-only `init` shortcut.
+
 ---
 
 # Validation Rules
@@ -167,6 +177,7 @@ Supports:
 --output, -o
 --append, -a
 -na
+-anc
 --force, -f
 --fullname
 --author
@@ -209,6 +220,7 @@ compact
 - appends into the target file instead of requiring overwrite
 - dedupes immediately when the file already exists
 - `-na` appends with full-line comments stripped
+- `-anc` is also accepted as append with full-line comments stripped
 - when `init` or `detect` are redirected with `>`, generated content goes to stdout and the `Wrote ...` status line is suppressed
 
 ### License Commands
@@ -230,6 +242,7 @@ compact
 
 ```bash
 gitig compact
+gitig -c
 gitig compact .gitignore
 gitig compact .gitignore --output clean --force
 ```

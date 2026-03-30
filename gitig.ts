@@ -141,11 +141,13 @@ Usage:
     gitig list [--source github|gh|ghg|ghc|gitignoreio|tt|all]
     gitig search <query> [--source github|gh|ghg|ghc|gitignoreio|tt|all]
     gitig view <template> [--source github|gh|ghg|ghc|gitignoreio|tt] [--no-comments|-nc]
+    gitig <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--no-comments|-nc]
     gitig init <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
     gitig I <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
     gitig i <template[,template...]|template ...> [--source github|gh|ghg|ghc|gitignoreio|tt] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
     gitig detect [--source github|gh|ghg|gitignoreio|tt] [--include os,editor] [--output .gitignore] [--append|-a|-na] [--force] [--no-comments|-nc]
     gitig compact [input] [--output file] [--force]
+    gitig -c [input] [--output file] [--force]
     gitig license list [--no-cache]
     gitig license search <query> [--no-cache]
     gitig license view <license> [--no-cache]
@@ -160,12 +162,14 @@ Usage:
 
 Source aliases:
     gh   = all GitHub templates
-    ghg  = GitHub Global/ templates
-    ghc  = GitHub community/ templates
+    ghg  = GitHub Global templates
+    ghc  = GitHub Community templates
     tt   = gitignore.io
 
 Examples:
     gitig view gh:Node -nc
+    gitig gh:Node
+    gitig gh:Node -nc
     gitig init gh:Node,ghg:macOS -nc --force
     gitig init gh:Node ghg:macOS -nc --force
     gitig I gh:Node ghg:macOS
@@ -182,6 +186,7 @@ Examples:
     gitig license
 
     gitig compact
+    gitig -c
     gitig compact .gitignore
     gitig compact .gitignore --output .gitignore.clean --force
 
@@ -189,6 +194,7 @@ Flags:
     --output, -o     Output path for init/detect/compact (default: .gitignore)
     --append, -a     Append to the output file and dedupe immediately
     -na              Append with comments stripped
+    -anc             Append with comments stripped
     --fullname       Replacement for [fullname]
     --project        Replacement for [project]
     --projecturl     Replacement for [projecturl]
@@ -309,6 +315,11 @@ function parseArgs(argv: string[]): Args {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
 
+    if (arg === "-c" && filtered.length === 0) {
+      filtered.push("compact");
+      continue;
+    }
+
     if (arg === "--output" || arg === "-o") {
       const next = args[i + 1];
       if (typeof next !== "string" || next.length === 0) {
@@ -371,6 +382,12 @@ function parseArgs(argv: string[]): Args {
     }
 
     if (arg === "-na") {
+      append = true;
+      noComments = true;
+      continue;
+    }
+
+    if (arg === "-anc") {
       append = true;
       noComments = true;
       continue;
@@ -798,13 +815,15 @@ function formatLicenseSuggestions(query: string, catalog: LicenseCatalogEntry[])
   const q = normalizeLoose(query);
   const suggestions = catalog
     .map((entry) => {
-      const score = Math.min(...entry.aliases.map((alias) => {
-        const candidate = normalizeLoose(alias);
-        if (candidate.includes(q) || q.includes(candidate)) {
-          return 0;
-        }
-        return levenshtein(q, candidate);
-      }));
+      const score = Math.min(
+        ...entry.aliases.map((alias) => {
+          const candidate = normalizeLoose(alias);
+          if (candidate.includes(q) || q.includes(candidate)) {
+            return 0;
+          }
+          return levenshtein(q, candidate);
+        }),
+      );
 
       return { entry, score };
     })
@@ -1601,10 +1620,10 @@ async function cmdView(name: string, source: SourceName, noCache: boolean, noCom
   process.stdout.write(content.endsWith("\n") ? content : `${content}\n`);
 }
 
-async function cmdInit(rawNames: string[], source: SourceName, output: string, outputExplicit: boolean, force: boolean, append: boolean, noCache: boolean, noComments: boolean): Promise<void> {
+async function cmdInit(rawNames: string[], source: SourceName, output: string, outputExplicit: boolean, force: boolean, append: boolean, noCache: boolean, noComments: boolean, forceStdout = false): Promise<void> {
   const content = await buildInitContent(rawNames, source, noCache, noComments);
 
-  if (shouldWriteToStdout(outputExplicit)) {
+  if (forceStdout || shouldWriteToStdout(outputExplicit)) {
     process.stdout.write(content);
     return;
   }
@@ -2445,6 +2464,22 @@ function getSelfTests(): SelfTestCase[] {
       },
     },
     {
+      name: "parseArgs recognizes -anc as append without comments",
+      run: () => {
+        const parsed = parseArgs(["init", "gh:Node", "-anc"]);
+        assertEqualString(String(parsed.append), "true", "append compact shorthand");
+        assertEqualString(String(parsed.noComments), "true", "append compact no comments shorthand");
+      },
+    },
+    {
+      name: "parseArgs recognizes -c as compact alias",
+      run: () => {
+        const parsed = parseArgs(["-c", ".gitignore"]);
+        assertEqualString(parsed.command ?? "", "compact", "compact alias command");
+        assertEqualStrings(parsed.rest, [".gitignore"], "compact alias args");
+      },
+    },
+    {
       name: "parseArgs recognizes license fullname, project, and year",
       run: () => {
         const parsed = parseArgs(["license", "init", "mit", "--fullname", "Jane Doe", "--project", "gitig", "--year", "2026"]);
@@ -2640,6 +2675,10 @@ async function main(): Promise<void> {
         printHelp();
         return;
       default:
+        if (!command.startsWith("-")) {
+          await cmdInit([command, ...rest], source === "all" ? "github" : source, output, outputExplicit, force, append, noCache, noComments, true);
+          return;
+        }
         console.error(`Unknown command: ${command}`);
         console.error(`Available commands: ${COMMANDS.join(", ")}`);
         printHelp();
