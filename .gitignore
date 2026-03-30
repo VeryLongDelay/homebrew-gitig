@@ -1,5 +1,6 @@
 .brew/*
 gitig*.tgz
+src/generated/*
 logs
 *.log
 npm-debug.log*

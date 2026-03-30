@@ -18,6 +18,7 @@
     ]
   },
   "include": [
-    "gitig.ts"
+    "gitig.ts",
+    "src/**/*.ts"
   ]
 }

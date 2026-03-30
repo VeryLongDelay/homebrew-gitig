@@ -12,7 +12,8 @@
   ],
   "scripts": {
     "clean": "node -e \"import('node:fs/promises').then(fs => fs.rm('dist', { recursive: true, force: true }))\"",
-    "build": "npm run clean && tsc -p tsconfig.json && chmod +x dist/gitig.js",
+    "generate-assets": "node scripts/generate-assets.mjs",
+    "build": "npm run clean && npm run generate-assets && tsc -p tsconfig.json && chmod +x dist/gitig.js",
     "prepare": "npm run build",
     "prepack": "npm run build",
     "test": "npm run build && node dist/gitig.js selftest"
