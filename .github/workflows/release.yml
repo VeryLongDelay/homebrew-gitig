@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify selftest
+        run: node dist/gitig.js selftest
+
+      # -----------------------------
+      # Detect npm token
+      # -----------------------------
+      - name: Check for npm token
+        id: npm_check
+        run: |
+          if [ -n "${NPM_TOKEN}" ]; then
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_token=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # -----------------------------
+      # Publish (only if token exists)
+      # -----------------------------
+      - name: Publish to npm
+        if: steps.npm_check.outputs.has_token == 'true'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Skip npm publish (no token)
+        if: steps.npm_check.outputs.has_token != 'true'
+        run: echo "⚠️ Skipping npm publish (no NPM_TOKEN provided)"
+
+      # -----------------------------
+      # Generate Homebrew formula
+      # -----------------------------
+      - name: Generate Homebrew formula
+        run: |
+          chmod +x scripts/release-homebrew.sh
+          ./scripts/release-homebrew.sh
+
+      # -----------------------------
+      # Push to tap repo
+      # -----------------------------
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_GITHUB_USERNAME/homebrew-tap
+          path: tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Copy formula to tap
+        run: |
+          mkdir -p tap/Formula
+          cp .brew/gitig.rb tap/Formula/gitig.rb
+
+      - name: Commit & push formula
+        run: |
+          cd tap
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add Formula/gitig.rb
+          git commit -m "gitig ${{ github.ref_name }}" || echo "No changes"
+          git push

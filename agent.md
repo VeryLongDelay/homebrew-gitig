@@ -1,364 +1,496 @@
-Here’s a clean context summary to paste into a new chat.
+Here’s a **clean, updated context summary** you can paste into a new chat to continue development seamlessly.
 
 ---
 
-I’m building a Bun-based CLI tool named **`gitig`** for generating and managing `.gitignore` files.
+# gitig – Project Context (2026)
 
-## Core purpose
+I am building a CLI tool called **`gitig`** for generating and managing `.gitignore` files and project licenses.
 
-`gitig` can:
+---
 
-- fetch templates from **GitHub’s `github/gitignore` repo**
-- fetch templates from **Toptal `gitignore.io`**
-- combine templates
+# Core Purpose
+
+`gitig` allows users to:
+
+- fetch `.gitignore` templates from:
+  - **github/gitignore**
+  - **gitignore.io**
+- fetch license templates from:
+  - **github/choosealicense.com**
+
+- combine multiple templates
 - detect likely templates from the current project
-- strip comments from generated or existing `.gitignore` files
+- strip comments from `.gitignore` files
+- generate `LICENSE` files from choosealicense templates
 - install shell completions
-- show provider/template stats and diagnostics
+- show stats and diagnostics
 
-## Implementation preferences
+---
 
-- **Bun + TypeScript**
-- **single-file CLI** (`gitig.ts`)
-- **minimal dependencies** — ideally no external runtime deps
-- keep imports minimal
-- **always avoid “possibly undefined” JavaScript/TypeScript errors**
-- prefer small readable functions
-- case-insensitive matching for template names
-- maintain good CLI ergonomics
+# Tech Stack
 
-## Current provider model
+- **Python 3**
+- primary CLI entrypoint:
 
-### Providers
+  ```
+  gitig.py
+  ```
+
+- standard library only at runtime
+
+---
+
+# Design Goals
+
+- fast CLI startup
+- zero / minimal runtime dependencies
+- minimal runtime dependencies
+- small readable functions
+- case-insensitive matching
+- good CLI ergonomics
+
+---
+
+# CLI Commands
+
+Supported commands:
+
+```bash
+list
+search
+view
+bare template args (prints generated `.gitignore` to stdout)
+init (aliases: I, i)
+detect
+compact
+license (subcommands: list, search, view, init; bare `license` aliases list)
+doctor
+stats
+check
+selftest
+completion
+install-completion
+help
+```
+
+---
+
+# Providers
+
+### Supported
 
 - `github`
 - `gitignoreio`
 
 ### Aliases
 
-- `gh` → all GitHub templates
-- `ghg` → GitHub `Global/` templates only
-- `ghc` → GitHub `community/` templates only
-- `tt` → `gitignore.io`
+```bash
+gh   → GitHub (all)
+ghg  → GitHub Global/
+ghc  → GitHub community/
+tt   → gitignore.io
+```
 
-### GitHub source behavior
+---
 
-GitHub templates are loaded from the **repo tree of `github/gitignore`**, not just the GitHub templates API, because I want support for:
+# Template Resolution
 
-- root templates
-- `Global/`
-- `community/`
-
-GitHub repo details used in code:
+### GitHub Source
 
 - repo: `github/gitignore`
 - branch: `main`
-- recursive tree via GitHub API
-- raw contents via `raw.githubusercontent.com`
+- uses recursive tree API
+- supports:
+  - root templates
+  - `Global/`
+  - `community/`
 
-## Existing command set
+### License Source
 
-The CLI currently supports:
+- repo: `github/choosealicense.com`
+- branch: `gh-pages`
+- reads `_licenses/*.txt`
+- parses YAML front matter for `title`, `spdx-id`, and `hidden`
+- ignores hidden licenses in the public catalog
 
-- `list`
-- `search`
-- `view`
-- `init`
-- `I`
-- `i`
-- `detect`
-- `compact`
-- `doctor`
-- `stats`
-- `completion`
-- `install-completion`
-- `help`
+---
 
-## Important command behavior
+# Template Parsing Behavior
 
-### `init`
+Handled by `parseTemplateArgs`.
 
-Aliases:
+Supports:
 
-- `init`
-- `I`
-- `i`
-
-It supports both comma-separated and space-separated template input.
-
-All of these should work:
-
-```bash
-gitig init gh:Node,ghg:macOS
-gitig init gh:Node ghg:macOS
-gitig I gh:Node ghg:macOS
-gitig i gh:node ghg:macos
-```
-
-### Sticky provider prefixes
-
-Inputs like these should work:
+### Sticky prefixes
 
 ```bash
 gitig i gh: node python
-gitig i ghg: macos jetbrains
-gitig i ghc: python/poetry javascript/node
-gitig i tt: node macos vscode
-gitig i gh: node,python
-gitig i gh: node python,go
+→ gh:node gh:python
 ```
 
-Meaning:
+### Mixed separators
 
 ```bash
-gitig i gh: node python
+gitig i gh:node,python go
 ```
 
-is treated like:
+### Case-insensitive
 
 ```bash
-gitig i gh:node gh:python
+gh:node
+ghg:macos
+ghc:python/poetry
 ```
 
-Sticky prefixes should remain in effect until another explicit prefix appears.
-
-### Case-insensitive template matching
-
-Template names should be case-insensitive, including scoped ones.
-
-Examples that should work:
+### Bare generation
 
 ```bash
-gitig i gh:node
-gitig i ghg:macos
-gitig i ghc:python/poetry
-gitig i tt:node
+gitig gh:Node
+gitig gh:Node -nc
 ```
 
-### `view`
+Behaves like a stdout-only `init` shortcut.
 
-Can show a single template from a chosen provider.
+---
+
+# Validation Rules
+
+### ❌ Do NOT mix providers
+
+```bash
+gitig i gh:Node tt:node   # error
+```
 
 ### `detect`
 
-Supports project detection with optional extras:
+Supports:
+
+- `gh`, `ghg`, `tt`
+- ❌ not `ghc`
+
+---
+
+# Flags
 
 ```bash
-gitig detect --include os,editor
+--output, -o
+--append, -a
+-na
+-anc
+--force, -f
+--fullname
+--author
+--owner
+--project
+--projecturl
+--year
+--source, -s
+--include
+--no-cache
+--no-comments, -nc
 ```
 
-`detect` should support:
+---
 
-- `github`
-- `gh`
-- `ghg`
-- `gitignoreio`
-- `tt`
+# `--no-comments` Behavior
 
-But **not** `ghc`, because community templates are not suitable for generic autodetect.
+- removes full-line comments
+- preserves escaped comments:
 
-### `compact`
+  ```
+  \# literal
+  ```
 
-This is for stripping comments from an existing `.gitignore`-style file.
+- collapses duplicate blank lines
+- keeps meaningful spacing
 
-Examples:
+Used in:
+
+```bash
+view
+init
+detect
+compact
+```
+
+### `--append` Behavior
+
+- for `init` and `detect`
+- appends into the target file instead of requiring overwrite
+- dedupes immediately when the file already exists
+- `-na` appends with full-line comments stripped
+- `-anc` is also accepted as append with full-line comments stripped
+- when `init` or `detect` are redirected with `>`, generated content goes to stdout and the `Wrote ...` status line is suppressed
+
+### License Commands
+
+- `license list` prints available license slugs
+- `license search <query>` searches slug, title, and SPDX id
+- `license view <license>` prints the raw license body without front matter
+- `license init <license>` writes a rendered `LICENSE` file
+- bare `license` aliases `license list`
+- `license init` supports `--fullname`, `--project`, `--projecturl`, and `--year`
+- `--author` and `--owner` are compatibility aliases for `--fullname`
+- `license init` defaults `--output` to `LICENSE`
+- if no placeholders are provided, only `[year]` is filled with the current year
+- `license init` replaces placeholders like `[year]`, `[yyyy]`, `[fullname]`, `[project]`, `[projecturl]`, and `[name of copyright owner]`
+
+---
+
+# `compact`
 
 ```bash
 gitig compact
+gitig -c
 gitig compact .gitignore
-gitig compact .gitignore --output .gitignore.clean --force
+gitig compact .gitignore --output clean --force
 ```
 
-Default input is `.gitignore`.
+Now shares logic with `--no-comments`.
 
-### `doctor`
+---
 
-Checks:
+# Caching
 
-- cache directory access
-- provider/catalog availability
-- detection behavior
-- shell completion target paths
-
-### `stats`
-
-Shows counts by provider and GitHub scope.
-
-## `--no-comments` behavior
-
-Supported for:
-
-- `view`
-- `init`
-- `detect`
-
-Alias:
-
-- `--no-comments`
-- `-nc`
-
-Behavior:
-
-- remove full-line comments
-- remove blank lines that become empty
-- keep actual ignore patterns
-- keep escaped `\#...` lines
-
-Examples:
-
-```bash
-gitig view gh:Node -nc
-gitig init gh:Node ghg:macOS -nc --force
-gitig detect --source gh --include os,editor -nc --force
-```
-
-## Shell completions
-
-Supported:
-
-- bash
-- zsh
-- fish
-
-Commands:
-
-- `gitig completion <bash|zsh|fish>`
-- `gitig install-completion <bash|zsh|fish>`
-
-Completions should know about:
-
-- command aliases including `I` and `i`
-- source aliases `gh`, `ghg`, `ghc`, `tt`
-- `-nc`
-- all existing commands
-
-## Current parsing expectations
-
-### `parseArgs`
-
-Parses:
-
-- `--output`, `-o`
-- `--force`, `-f`
-- `--source`, `-s`
-- `--include`
-- `--no-cache`
-- `--no-comments`, `-nc`
-
-### `parseTemplateArgs`
-
-This is the function that:
-
-- splits on commas and spaces
-- trims tokens
-- supports sticky prefixes like `gh:`
-- expands bare names using the current sticky prefix
-
-## Validation rules
-
-### Mixed providers
-
-Do **not** allow mixing GitHub templates and gitignore.io templates in one `init` run.
-
-This should error:
-
-```bash
-gitig i gh:Node tt:node
-```
-
-### GitHub scopes
-
-The current implementation should allow scoped GitHub inputs via prefixes:
-
-- `gh:`
-- `ghg:`
-- `ghc:`
-
-GitHub global/community names are relative:
-
-- `ghg:macOS` → `Global/macOS`
-- `ghc:Python/Poetry` → `community/Python/Poetry`
-
-## Caching
-
-Catalogs are cached under:
+Stored in:
 
 ```bash
 ~/.cache/gitig
 ```
 
-with a TTL of 24 hours.
-
-Cache files include:
+Includes:
 
 - GitHub catalog
 - gitignore.io catalog
 
-There is a `--no-cache` flag.
+Features:
 
-## Current code style goals
+- TTL: 24h
+- `--no-cache`
+- cache status reporting
 
-- keep TypeScript strict and safe
-- no unsafe indexing without checks
-- no “possibly undefined” issues
-- minimal dependencies
-- Bun-native where reasonable
-- no unnecessary libraries
+---
 
-## Current package metadata
+# `stats` Improvements
 
-The project name is:
+Shows:
 
-```json
-{
-  "name": "gitig"
-}
+- provider counts
+- GitHub scope counts
+- cache:
+  - hit / miss / stale / bypassed
+  - cache age
+  - cache path
+
+---
+
+# `doctor`
+
+Checks:
+
+- cache health + age
+- provider availability
+- detection behavior
+- completion install paths
+
+---
+
+# Self Tests
+
+Command:
+
+```bash
+gitig check
+gitig selftest
 ```
 
-Recent version used was around:
+Covers:
 
-```json
-"version": "1.1.0"
+- template parsing edge cases
+- sticky prefix behavior
+- mixed separators
+
+No external dependencies.
+
+---
+
+# Shell Completions
+
+Supports:
+
+```bash
+bash
+zsh
+fish
 ```
 
-## Typical example usage to preserve
+Commands:
+
+```bash
+gitig completion <shell>
+gitig install-completion <shell>
+```
+
+Design:
+
+- includes aliases (`i`, `I`)
+- includes flags (`-nc`)
+- structured to allow **future template-aware completion**
+
+---
+
+# Local Development
+
+## Build
+
+```bash
+npm run build
+```
+
+## Run
+
+```bash
+node dist/gitig.js help
+```
+
+## Link globally (dev)
+
+```bash
+npm link
+```
+
+---
+
+# ⚠️ Important Build Detail
+
+After `npm run build`, the executable bit can be lost.
+
+### Required
+
+- `gitig.ts` must start with:
+
+  ```ts
+  #!/usr/bin/env node
+  ```
+
+- build script must include:
+
+```json
+"build": "tsc -p tsconfig.json && chmod +x dist/gitig.js"
+```
+
+Otherwise:
+
+```bash
+zsh: permission denied: gitig
+```
+
+---
+
+# Installation (local, no Homebrew)
+
+### Recommended
+
+```bash
+npm install -g .
+```
+
+or:
+
+```bash
+npm link
+```
+
+---
+
+# Homebrew Support
+
+Supports:
+
+- local tap testing
+- published tap
+
+## Key distinction
+
+### Local testing
+
+Uses:
+
+```
+file://.../gitig-x.x.x.tgz
+```
+
+### Published
+
+Uses:
+
+```
+https://registry.npmjs.org/gitig/-/gitig-x.x.x.tgz
+```
+
+---
+
+# Scripts
+
+### `release-homebrew.sh`
+
+Modes:
+
+```bash
+--mode local   # for testing
+--mode npm     # for real releases
+```
+
+---
+
+### `install-homebrew-local.sh`
+
+- creates local git-backed tap
+- installs via:
+
+```bash
+brew install local/tap/gitig
+```
+
+- handles Apple Silicon (`arch -arm64`)
+
+---
+
+# GitHub Actions
+
+- triggers on tags (`v*`)
+- builds
+- runs selftest
+- optionally publishes to npm (skips if no token)
+- updates Homebrew tap
+
+---
+
+# Example Usage
 
 ```bash
 gitig list --source gh
-gitig list --source ghg
-gitig list --source ghc
-gitig list --source tt
-
-gitig view gh:Node
-gitig view ghg:macOS
-gitig view ghc:Python/Poetry
-gitig view tt:node
 gitig view gh:Node -nc
-
-gitig init gh:Node,ghg:macOS --force
-gitig init gh:Node ghg:macOS --force
-gitig I gh:Node ghg:macOS
-gitig i gh:node ghg:macos -nc
-
 gitig i gh: node python
 gitig i ghg: macos jetbrains
-gitig i ghc: python/poetry javascript/node
-gitig i tt: node macos vscode
-
-gitig detect --source gh --include os,editor --force
-gitig detect --source ghg --include os,editor -nc --force
-
+gitig detect --source gh --include os,editor
 gitig compact
-gitig compact .gitignore --output .gitignore.clean --force
-
-gitig doctor
 gitig stats
-gitig stats --source gh
-gitig stats --source ghg
-gitig stats --source ghc
-gitig stats --source tt
+gitig doctor
+gitig selftest
 ```
 
-## What I want next in the new chat
+---
 
-Start from this current `gitig` state and continue improving it without losing any of the above behavior.
+# Next Possible Improvements
+
+Good next steps:
+
+- template-aware shell completion
+- GitHub Releases + changelog automation
+- version/tag consistency check
+- binary build (pkg / single-file)
+- faster catalog caching (ETag support)
+- plugin system (future)
+
+---
