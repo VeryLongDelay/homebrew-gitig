@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import sys
@@ -35,6 +36,8 @@ class Args:
     source: SourceName
     no_cache: bool
     no_comments: bool
+    quiet: bool
+    json_output: bool
     detect_includes: list[DetectInclude]
 
 
@@ -154,6 +157,7 @@ COMMANDS = [
     "completion",
     "install-completion",
     "help",
+    "update",
     "update-catalog",
     "refresh-catalog",
 ]
@@ -193,10 +197,7 @@ Commands:
   completion <bash|zsh|fish>
   install-completion <bash|zsh|fish>
   help
-  update-catalog [all|github|gitignoreio|license]
-  refresh-catalog [all|github|gitignoreio|license]
-  update-catalog [all|github|gitignoreio|license]
-  refresh-catalog [all|github|gitignoreio|license]
+  update [all|github|ghg|ghc|tt|license]
 
 Examples:
   gitig gh:Node
@@ -207,8 +208,10 @@ Examples:
   gitig li mit --fullname "Jane Doe"
   gitig license
   gitig license init mit --fullname "Jane Doe" --year 2026
-  gitig update-catalog
-  gitig update-catalog license
+  gitig update
+  gitig update license
+  gitig update --quiet
+  gitig update --json
 
 Flags:
   -o, --output <file>
@@ -218,6 +221,12 @@ Flags:
   -c
   -s, --source <gh|ghg|ghc|tt|all>
   --include <os,editor>
+  --quiet
+  --json
+
+Notes:
+  update refreshes cached catalogs on demand.
+  --json disables the spinner for update so stdout remains valid JSON.
   --no-cache
   --year <year>
   --fullname <name>
@@ -340,6 +349,8 @@ def parse_args(argv: list[str]) -> Args:
     source: SourceName | None = None
     no_cache = False
     no_comments = False
+    quiet = False
+    json_output = False
     detect_includes: list[DetectInclude] = []
     filtered: list[str] = []
 
@@ -447,6 +458,16 @@ def parse_args(argv: list[str]) -> Args:
             i += 1
             continue
 
+        if arg == "--quiet":
+            quiet = True
+            i += 1
+            continue
+
+        if arg == "--json":
+            json_output = True
+            i += 1
+            continue
+
         filtered.append(arg)
         i += 1
 
@@ -466,6 +487,8 @@ def parse_args(argv: list[str]) -> Args:
         source=source or default_source_for_command(command),
         no_cache=no_cache,
         no_comments=no_comments,
+        quiet=quiet,
+        json_output=json_output,
         detect_includes=detect_includes,
     )
 
@@ -506,6 +529,7 @@ def gitignoreio_catalog_cache_ttl_ms() -> int:
 def license_catalog_cache_ttl_ms() -> int:
     return get_cache_ttl_ms("GITIG_LICENSE_CATALOG_CACHE_TTL_SECONDS")
 
+
 class Spinner:
     FRAMES = [
         "⠋",
@@ -520,9 +544,7 @@ class Spinner:
         "⠓",
     ]
     INTERVAL_SECONDS = 0.1
-    FALLBACK_PREFIX = "  "
-
-    SPINNER_COLOR = "\033[38;2;71;136;208m"  # #4788d0
+    SPINNER_COLOR = "\033[38;2;71;136;208m"
     DONE_COLOR = "\033[38;2;71;136;208m"
     FAIL_COLOR = "\033[31m"
     RESET = "\033[0m"
@@ -536,13 +558,8 @@ class Spinner:
     ) -> None:
         self.message = message
         self.stream = stream or sys.stderr
-        self.enabled = bool(
-            enabled if enabled is not None else hasattr(self.stream, "isatty") and self.stream.isatty()
-        )
-        self.no_color = bool(no_color) if no_color is not None else (
-            bool(os.getenv("NO_COLOR") or os.getenv("NO_COLOUR"))
-        )
-
+        self.enabled = bool(enabled if enabled is not None else hasattr(self.stream, "isatty") and self.stream.isatty())
+        self.no_color = bool(no_color) if no_color is not None else bool(os.getenv("NO_COLOR") or os.getenv("NO_COLOUR"))
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._index = 0
@@ -554,7 +571,7 @@ class Spinner:
     def _clear(self) -> None:
         self._write("\r\033[2K")
 
-    def _color(self, text: str, color: str) -> str:
+    def _colorize(self, text: str, color: str) -> str:
         if self.no_color or not self.enabled:
             return text
         return f"{color}{text}{self.RESET}"
@@ -562,7 +579,7 @@ class Spinner:
     def _frame(self) -> str:
         frame = self.FRAMES[self._index]
         self._index = (self._index + 1) % len(self.FRAMES)
-        return self._color(frame, self.SPINNER_COLOR)
+        return self._colorize(frame, self.SPINNER_COLOR)
 
     def _render(self) -> None:
         self._write(f"\r\033[2K{self._frame()} {self.message}")
@@ -573,39 +590,31 @@ class Spinner:
 
     def __enter__(self) -> "Spinner":
         if not self.enabled:
-            # simple fallback (no animation)
-            self._write(f"{self.FALLBACK_PREFIX}{self.FRAMES[0]} {self.message}")
             return self
-
         self._clear()
         self._render()
-
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        self._done.set()
-
-        if self._thread:
-            self._thread.join(timeout=0.2)
-
         if not self.enabled:
-            self._write("\n")
             return
-
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
         status = "done" if exc is None else "failed"
         color = self.DONE_COLOR if exc is None else self.FAIL_COLOR
+        self._write(f"\r\033[2K{self._colorize(status, color)} {self.message}\n")
 
-        self._write(f"\r\033[2K{self._color(status, color)} {self.message}\n")
 
-def fetch_bytes(url: str, accept_json: bool = False, status: str | None = None) -> bytes:
+def fetch_bytes(url: str, accept_json: bool = False, status: str | None = None, spinner_enabled: bool = True, no_color: bool | None = None) -> bytes:
     headers = {"User-Agent": "gitig-python"}
     if accept_json:
         headers["Accept"] = "application/vnd.github+json"
     req = Request(url, headers=headers)
     try:
-        with Spinner(status or f"Fetching {url}"), urlopen(req) as response:
+        with Spinner(status or f"Fetching {url}", enabled=spinner_enabled, no_color=no_color), urlopen(req) as response:
             return response.read()
     except HTTPError as exc:
         raise RuntimeError(f"Request failed: {exc.code} {exc.reason}") from exc
@@ -613,12 +622,12 @@ def fetch_bytes(url: str, accept_json: bool = False, status: str | None = None) 
         raise RuntimeError(f"Request failed: {exc.reason}") from exc
 
 
-def fetch_json(url: str, status: str | None = None) -> Any:
-    return json.loads(fetch_bytes(url, accept_json=True, status=status).decode("utf8"))
+def fetch_json(url: str, status: str | None = None, spinner_enabled: bool = True, no_color: bool | None = None) -> Any:
+    return json.loads(fetch_bytes(url, accept_json=True, status=status, spinner_enabled=spinner_enabled, no_color=no_color).decode("utf8"))
 
 
-def fetch_text(url: str, status: str | None = None) -> str:
-    return fetch_bytes(url, status=status).decode("utf8")
+def fetch_text(url: str, status: str | None = None, spinner_enabled: bool = True, no_color: bool | None = None) -> str:
+    return fetch_bytes(url, status=status, spinner_enabled=spinner_enabled, no_color=no_color).decode("utf8")
 
 
 def cache_path_for(name: str) -> Path:
@@ -647,10 +656,10 @@ def write_cache_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2), "utf8")
 
 
-def refresh_github_catalog() -> CatalogLoadResult:
+def refresh_github_catalog(spinner_enabled: bool = True) -> CatalogLoadResult:
     cache_path = cache_path_for("github-catalog")
     ttl_ms = github_catalog_cache_ttl_ms()
-    tree = fetch_json(GITHUB_TREE_URL, "Refreshing GitHub template catalog")
+    tree = fetch_json(GITHUB_TREE_URL, "Refreshing GitHub template catalog", spinner_enabled=spinner_enabled)
     catalog: list[CatalogEntry] = []
     for item in tree["tree"]:
         if item.get("type") != "blob":
@@ -663,10 +672,10 @@ def refresh_github_catalog() -> CatalogLoadResult:
     return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
 
-def refresh_gitignoreio_catalog() -> CatalogLoadResult:
+def refresh_gitignoreio_catalog(spinner_enabled: bool = True) -> CatalogLoadResult:
     cache_path = cache_path_for("gitignoreio-catalog")
     ttl_ms = gitignoreio_catalog_cache_ttl_ms()
-    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Refreshing gitignore.io template catalog")
+    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Refreshing gitignore.io template catalog", spinner_enabled=spinner_enabled)
     keys = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
     catalog = [
         CatalogEntry("gitignoreio", key, key, key, unique_sorted([key, f"tt:{key}", f"gitignoreio:{key}"]))
@@ -676,9 +685,9 @@ def refresh_gitignoreio_catalog() -> CatalogLoadResult:
     return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
 
-def refresh_license_catalog() -> list[LicenseCatalogEntry]:
+def refresh_license_catalog(spinner_enabled: bool = True) -> list[LicenseCatalogEntry]:
     cache_path = cache_path_for("license-catalog")
-    tree = fetch_json(LICENSE_TREE_URL, "Refreshing license catalog")
+    tree = fetch_json(LICENSE_TREE_URL, "Refreshing license catalog", spinner_enabled=spinner_enabled)
     paths = sorted(
         item["path"]
         for item in tree["tree"]
@@ -690,6 +699,7 @@ def refresh_license_catalog() -> list[LicenseCatalogEntry]:
             fetch_text(
                 f"{LICENSE_RAW_BASE}/{path}",
                 f"Refreshing license metadata {path.removeprefix('_licenses/').removesuffix('.txt')}",
+                spinner_enabled=spinner_enabled,
             ),
         )
         for path in paths
@@ -698,37 +708,91 @@ def refresh_license_catalog() -> list[LicenseCatalogEntry]:
     return [entry for entry in catalog if not entry.hidden]
 
 
-def cmd_update_catalog(target: str | None = None) -> None:
+def _normalize_update_target(target: str | None) -> str:
     normalized = (target or "all").strip().lower()
-    if normalized in ("all", ""):
-        github = refresh_github_catalog()
-        gitignoreio = refresh_gitignoreio_catalog()
-        licenses = refresh_license_catalog()
-        print(f"Updated github catalog ({len(github.catalog)} templates)")
-        print(f"Updated gitignore.io catalog ({len(gitignoreio.catalog)} templates)")
-        print(f"Updated license catalog ({len(licenses)} licenses)")
-        return
-    if normalized in ("github", "gh", "github-global", "ghg", "github-community", "ghc"):
-        github = refresh_github_catalog()
-        if normalized in ("github-global", "ghg"):
+    alias_map = {
+        "": "all",
+        "gh": "github",
+        "ghg": "github-global",
+        "ghc": "github-community",
+        "tt": "gitignoreio",
+        "licenses": "license",
+    }
+    normalized = alias_map.get(normalized, normalized)
+    valid = {"all", "github", "github-global", "github-community", "gitignoreio", "license"}
+    if normalized not in valid:
+        raise ValueError("update requires one of: all, github, github-global, github-community, gitignoreio, license")
+    return normalized
+
+
+def _build_update_result(name: str, count: int, cache_path: Path) -> dict[str, Any]:
+    return {
+        "target": name,
+        "count": count,
+        "cache_path": str(cache_path),
+        "status": "updated",
+    }
+
+
+def cmd_update_catalog(target: str | None = None, quiet: bool = False, json_output: bool = False) -> None:
+    normalized = _normalize_update_target(target)
+    spinner_enabled = not json_output
+
+    def refresh_target(name: str) -> dict[str, Any]:
+        if name == "github":
+            github = refresh_github_catalog(spinner_enabled=False)
+            return _build_update_result("github", len(github.catalog), cache_path_for("github-catalog"))
+        if name == "github-global":
+            github = refresh_github_catalog(spinner_enabled=False)
             count = len([entry for entry in github.catalog if entry.github_scope == "global"])
-            print(f"Updated github global catalog ({count} templates)")
-            return
-        if normalized in ("github-community", "ghc"):
+            return _build_update_result("github-global", count, cache_path_for("github-catalog"))
+        if name == "github-community":
+            github = refresh_github_catalog(spinner_enabled=False)
             count = len([entry for entry in github.catalog if entry.github_scope == "community"])
-            print(f"Updated github community catalog ({count} templates)")
-            return
-        print(f"Updated github catalog ({len(github.catalog)} templates)")
+            return _build_update_result("github-community", count, cache_path_for("github-catalog"))
+        if name == "gitignoreio":
+            gitignoreio = refresh_gitignoreio_catalog(spinner_enabled=False)
+            return _build_update_result("gitignoreio", len(gitignoreio.catalog), cache_path_for("gitignoreio-catalog"))
+        licenses = refresh_license_catalog(spinner_enabled=False)
+        return _build_update_result("license", len(licenses), cache_path_for("license-catalog"))
+
+    targets = [normalized]
+    if normalized == "all":
+        targets = ["github", "gitignoreio", "license"]
+
+    start_time = time.time()
+    results: list[dict[str, Any]] = []
+
+    spinner_cm = Spinner("Updating catalogs", enabled=spinner_enabled)
+    with spinner_cm:
+        if len(targets) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
+                future_map = {executor.submit(refresh_target, name): name for name in targets}
+                for future in concurrent.futures.as_completed(future_map):
+                    results.append(future.result())
+        else:
+            results.append(refresh_target(targets[0]))
+
+    order = {name: index for index, name in enumerate(targets)}
+    results.sort(key=lambda item: order.get(item["target"], 999))
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    payload = {
+        "target": normalized,
+        "updated": results,
+        "duration_ms": duration_ms,
+        "parallel": len(targets) > 1,
+    }
+
+    if json_output:
+        print(json.dumps(payload, indent=2))
         return
-    if normalized in ("gitignoreio", "tt"):
-        gitignoreio = refresh_gitignoreio_catalog()
-        print(f"Updated gitignore.io catalog ({len(gitignoreio.catalog)} templates)")
+
+    if quiet:
         return
-    if normalized in ("license", "licenses"):
-        licenses = refresh_license_catalog()
-        print(f"Updated license catalog ({len(licenses)} licenses)")
-        return
-    raise ValueError("update-catalog requires one of: all, github, github-global, github-community, gitignoreio, license")
+
+    for item in results:
+        print(f"Updated {item['target']} catalog ({item['count']} entries)")
 
 
 def format_age_ms(age_ms: int | None) -> str:
@@ -1623,6 +1687,8 @@ def get_self_tests() -> list[SelfTestCase]:
         SelfTestCase("implicit init only forces stdout without append or explicit output", lambda: _test_implicit_init_stdout_behavior()),
         SelfTestCase("parseArgs recognizes license fullname, project, and year", lambda: _test_parse_license_fields()),
         SelfTestCase("parseArgs keeps --author and --owner as fullname aliases", lambda: _test_parse_fullname_aliases()),
+        SelfTestCase("parseArgs recognizes --quiet", lambda: _test_parse_quiet_flag()),
+        SelfTestCase("parseArgs recognizes --json", lambda: _test_parse_json_flag()),
         SelfTestCase("resolveLicenseInvocation defaults to list", lambda: _test_license_invocation_default()),
         SelfTestCase("mergeAppendedContent dedupes repeated lines", lambda: assert_equal_string(merge_appended_content("a\nb\n", "b\nc\n"), "a\nb\nc\n", "append dedupe")),
         SelfTestCase("parseTemplateArgs trims empty comma segments", lambda: assert_equal_strings(parse_template_args(["gh:", "node,,python", "", "go,"]), ["gh:node", "gh:python", "gh:go"], "empty comma segments")),
@@ -1695,6 +1761,16 @@ def _test_parse_fullname_aliases() -> None:
     owner_parsed = parse_args(["license", "init", "mit", "--owner", "Jane Doe"])
     assert_equal_string(author_parsed.fullname or "", "Jane Doe", "license author alias")
     assert_equal_string(owner_parsed.fullname or "", "Jane Doe", "license owner alias")
+
+
+def _test_parse_quiet_flag() -> None:
+    parsed = parse_args(["update", "--quiet"])
+    assert_equal_string(str(parsed.quiet), "True", "quiet flag")
+
+
+def _test_parse_json_flag() -> None:
+    parsed = parse_args(["update", "--json"])
+    assert_equal_string(str(parsed.json_output), "True", "json flag")
 
 
 def _test_license_invocation_default() -> None:
@@ -1792,8 +1868,8 @@ def main() -> None:
         if command == "install-completion":
             cmd_install_completion(parsed.rest[0] if parsed.rest else "")
             return
-        if command in ("update-catalog", "refresh-catalog"):
-            cmd_update_catalog(parsed.rest[0] if parsed.rest else None)
+        if command in ("update", "update-catalog", "refresh-catalog"):
+            cmd_update_catalog(parsed.rest[0] if parsed.rest else None, quiet=parsed.quiet, json_output=parsed.json_output)
             return
         if command in ("help", "--help", "-h", None):
             print_help()

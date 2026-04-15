@@ -1,516 +1,279 @@
-Here’s a **clean, updated context summary** you can paste into a new chat to continue development seamlessly.
+# 📦 Project Context: `gitig`
+
+## Overview
+
+**gitig** is a **CLI tool for generating `.gitignore` files and LICENSE files** from:
+
+- GitHub gitignore repo
+- gitignore.io (Toptal)
+- choosealicense.com (GitHub)
+
+It is designed to be:
+
+- ⚡ fast (cache + parallel fetch)
+- 🧠 smart (template detection, suggestions)
+- 🧰 minimal (no external deps, stdlib only)
+- 🖥️ terminal-first UX (spinner, colors, clean output)
 
 ---
 
-# gitig – Project Context (2026)
+# 🏗️ Key Features
 
-I am building a CLI tool called **`gitig`** for generating and managing `.gitignore` files and project licenses.
-
----
-
-# Core Purpose
-
-`gitig` allows users to:
-
-- fetch `.gitignore` templates from:
-  - **github/gitignore**
-  - **gitignore.io**
-- fetch license templates from:
-  - **github/choosealicense.com**
-
-- combine multiple templates
-- detect likely templates from the current project
-- strip comments from `.gitignore` files
-- generate `LICENSE` files from choosealicense templates
-- install shell completions
-- show stats and diagnostics
-
----
-
-# Tech Stack
-
-<<<<<<< HEAD
-- **Node.js + TypeScript (no Bun)**
-- compiled to:
-
-  ```
-  dist/gitig.js
-  ```
-
-- single CLI entrypoint
-- minimal dependencies (ideally none at runtime)
-=======
-- **Python 3**
-- primary CLI entrypoint:
-
-  ```
-  gitig.py
-  ```
-
-- standard library only at runtime
->>>>>>> python
-
----
-
-# Design Goals
-
-- fast CLI startup
-- zero / minimal runtime dependencies
-<<<<<<< HEAD
-- strict TypeScript safety (no “possibly undefined”)
-=======
-- minimal runtime dependencies
->>>>>>> python
-- small readable functions
-- case-insensitive matching
-- good CLI ergonomics
-
----
-
-# CLI Commands
-
-Supported commands:
+## Core Commands
 
 ```bash
-list
-search
-view
-bare template args (prints generated `.gitignore` to stdout)
-init (aliases: I, i)
-detect
-compact
-<<<<<<< HEAD
-license (subcommands: list, search, view, init; bare `license <name>` aliases init)
-=======
-license (subcommands: list, search, view, init; bare `license` aliases list)
->>>>>>> python
-doctor
-stats
-check
-selftest
-completion
-install-completion
-help
-```
-
----
-
-# Providers
-
-### Supported
-
-- `github`
-- `gitignoreio`
-
-### Aliases
-
-```bash
-gh   → GitHub (all)
-ghg  → GitHub Global/
-ghc  → GitHub community/
-tt   → gitignore.io
-```
-
----
-
-# Template Resolution
-
-### GitHub Source
-
-- repo: `github/gitignore`
-- branch: `main`
-- uses recursive tree API
-- supports:
-  - root templates
-  - `Global/`
-  - `community/`
-
-### License Source
-
-- repo: `github/choosealicense.com`
-- branch: `gh-pages`
-- reads `_licenses/*.txt`
-- parses YAML front matter for `title`, `spdx-id`, and `hidden`
-- ignores hidden licenses in the public catalog
-
----
-
-# Template Parsing Behavior
-
-Handled by `parseTemplateArgs`.
-
-Supports:
-
-### Sticky prefixes
-
-```bash
-gitig i gh: node python
-→ gh:node gh:python
-```
-
-### Mixed separators
-
-```bash
-gitig i gh:node,python go
-```
-
-### Case-insensitive
-
-```bash
-gh:node
-ghg:macos
-ghc:python/poetry
-```
-
-### Bare generation
-
-```bash
-gitig gh:Node
-gitig gh:Node -nc
-```
-
-Behaves like a stdout-only `init` shortcut.
-
----
-
-# Validation Rules
-
-### ❌ Do NOT mix providers
-
-```bash
-gitig i gh:Node tt:node   # error
-```
-
-### `detect`
-
-Supports:
-
-- `gh`, `ghg`, `tt`
-- ❌ not `ghc`
-
----
-
-# Flags
-
-```bash
---output, -o
---append, -a
--na
--anc
---force, -f
---fullname
---author
---owner
---project
---projecturl
---year
---source, -s
---include
---no-cache
---no-comments, -nc
-```
-
----
-
-# `--no-comments` Behavior
-
-- removes full-line comments
-- preserves escaped comments:
-
-  ```
-  \# literal
-  ```
-
-- collapses duplicate blank lines
-- keeps meaningful spacing
-
-Used in:
-
-```bash
-view
-init
-detect
-compact
-```
-
-### `--append` Behavior
-
-- for `init` and `detect`
-- appends into the target file instead of requiring overwrite
-- dedupes immediately when the file already exists
-- `-na` appends with full-line comments stripped
-- `-anc` is also accepted as append with full-line comments stripped
-- when `init` or `detect` are redirected with `>`, generated content goes to stdout and the `Wrote ...` status line is suppressed
-
-### License Commands
-
-- `license list` prints available license slugs
-- `license search <query>` searches slug, title, and SPDX id
-- `license view <license>` prints the raw license body without front matter
-- `license init <license>` writes a rendered `LICENSE` file
-- bare `license` aliases `license list`
-- `license init` supports `--fullname`, `--project`, `--projecturl`, and `--year`
-- `--author` and `--owner` are compatibility aliases for `--fullname`
-- `license init` defaults `--output` to `LICENSE`
-- if no placeholders are provided, only `[year]` is filled with the current year
-- `license init` replaces placeholders like `[year]`, `[yyyy]`, `[fullname]`, `[project]`, `[projecturl]`, and `[name of copyright owner]`
-
----
-
-# `compact`
-
-```bash
+gitig list
+gitig search <query>
+gitig view <template>
+gitig init <templates...>
+gitig detect
 gitig compact
-gitig -c
-gitig compact .gitignore
-gitig compact .gitignore --output clean --force
+gitig license
+gitig doctor
+gitig stats
+gitig update
 ```
-
-Now shares logic with `--no-comments`.
 
 ---
 
-# Caching
+## 🚀 `update` command (latest addition)
+
+Primary command for refreshing catalogs.
+
+### Usage
+
+```bash
+gitig update
+gitig update all
+
+gitig update github
+gitig update gh
+gitig update ghg
+gitig update ghc
+gitig update tt
+gitig update license
+```
+
+### Flags
+
+```bash
+gitig update --quiet
+gitig update --json
+```
+
+### Behavior
+
+- Refreshes:
+  - GitHub gitignore catalog
+  - gitignore.io catalog
+  - license catalog
+
+- Uses **parallel fetch** when updating multiple sources
+- Writes to local cache
+- Supports:
+  - `--quiet` → no stdout output
+  - `--json` → structured output (disables spinner)
+
+### Backward compatibility
+
+```bash
+gitig update-catalog
+gitig refresh-catalog
+```
+
+---
+
+# 🎨 Spinner System
+
+## Style
+
+Uses braille animation:
+
+```
+⠋ ⠙ ⠚ ⠞ ⠖ ⠦ ⠴ ⠲ ⠳ ⠓
+```
+
+## Behavior
+
+- Runs at **100ms interval**
+- Clears line before redraw
+- Writes to **stderr**
+- Disabled when:
+  - non-TTY
+  - `--no-color`
+  - `NO_COLOR` / `NO_COLOUR`
+  - `--json` mode
+
+## Colors
+
+- Spinner: `#4788d0`
+- `done`: `#4788d0`
+- `failed`: red
+
+---
+
+# ⚡ Performance Optimizations
+
+## 1. Parallel Fetch (NEW)
+
+- `update all` runs:
+  - GitHub
+  - gitignore.io
+  - license
+
+- concurrently using threads
+
+---
+
+## 2. Configurable Cache TTL
+
+Environment variables:
+
+```bash
+GITIG_GITHUB_CATALOG_CACHE_TTL_SECONDS
+GITIG_GITIGNOREIO_CATALOG_CACHE_TTL_SECONDS
+GITIG_LICENSE_CATALOG_CACHE_TTL_SECONDS
+```
+
+Defaults:
+
+- 24 hours
+
+---
+
+## 3. HTTP Improvements
+
+- Shared timeout (15s)
+- Spinner wraps all network calls
+
+---
+
+## 4. Smarter Suggestions
+
+- Shortlist before Levenshtein
+- Reduced CPU cost
+
+---
+
+## 5. File System Optimization
+
+- Precomputed probe existence in `detect`
+- Reduced repeated `.exists()` calls
+
+---
+
+# 🧠 Architecture
+
+## Key Components
+
+### Catalog Loaders
+
+```python
+get_github_catalog_with_cache()
+get_gitignoreio_catalog_with_cache()
+get_license_catalog()
+```
+
+### Fetch Layer
+
+```python
+fetch_bytes()
+fetch_json()
+fetch_text()
+```
+
+All network calls go through:
+
+- spinner
+- timeout
+- optional no-color
+
+---
+
+### Spinner
+
+Single shared class used across:
+
+- catalog fetch
+- template fetch
+- license fetch
+- update command
+
+---
+
+### Cache
 
 Stored in:
 
 ```bash
-~/.cache/gitig
+~/.cache/gitig/
 ```
 
-Includes:
+Files:
 
-- GitHub catalog
-- gitignore.io catalog
-
-Features:
-
-- TTL: 24h
-- `--no-cache`
-- cache status reporting
+- `github-catalog.json`
+- `gitignoreio-catalog.json`
+- `license-catalog.json`
 
 ---
 
-# `stats` Improvements
+# 🧪 Testing
 
-Shows:
-
-- provider counts
-- GitHub scope counts
-- cache:
-  - hit / miss / stale / bypassed
-  - cache age
-  - cache path
-
----
-
-# `doctor`
-
-Checks:
-
-- cache health + age
-- provider availability
-- detection behavior
-- completion install paths
-
----
-
-# Self Tests
-
-Command:
+Built-in:
 
 ```bash
-gitig check
 gitig selftest
 ```
 
 Covers:
 
-- template parsing edge cases
-- sticky prefix behavior
-- mixed separators
-
-No external dependencies.
-
----
-
-# Shell Completions
-
-Supports:
-
-```bash
-bash
-zsh
-fish
-```
-
-Commands:
-
-```bash
-gitig completion <shell>
-gitig install-completion <shell>
-```
-
-Design:
-
-- includes aliases (`i`, `I`)
-- includes flags (`-nc`)
-- structured to allow **future template-aware completion**
+- argument parsing
+- template parsing
+- license formatting
+- edge cases
 
 ---
 
-# Local Development
+# ⚠️ Known Constraints
 
-## Build
-
-```bash
-npm run build
-```
-
-## Run
-
-```bash
-node dist/gitig.js help
-```
-
-## Link globally (dev)
-
-```bash
-npm link
-```
+- No external dependencies (stdlib only)
+- Spinner uses threads (lightweight but present)
+- Unicode spinner requires modern terminal
 
 ---
 
-# ⚠️ Important Build Detail
+# 🔥 Recent Changes (Important)
 
-After `npm run build`, the executable bit can be lost.
-
-### Required
-
-- `gitig.ts` must start with:
-
-  ```ts
-  #!/usr/bin/env node
-  ```
-
-- build script must include:
-
-```json
-"build": "tsc -p tsconfig.json && chmod +x dist/gitig.js"
-```
-
-Otherwise:
-
-```bash
-zsh: permission denied: gitig
-```
+1. ✅ Replaced spinner with braille animation
+2. ✅ Added color system + `--no-color`
+3. ✅ Added `update` command (primary)
+4. ✅ Added `--quiet` and `--json`
+5. ✅ Added parallel fetch
+6. ✅ Added configurable cache TTL
+7. ✅ Fixed detect bug (`or True`)
+8. ✅ Optimized suggestions + filesystem checks
 
 ---
 
-# Installation (local, no Homebrew)
+# 🎯 Design Philosophy
 
-### Recommended
-
-```bash
-npm install -g .
-```
-
-or:
-
-```bash
-npm link
-```
+- Prefer **simple CLI UX**
+- Keep **one obvious command** (`update`)
+- Optimize for **fast feedback**
+- Avoid unnecessary dependencies
+- Keep code **readable + hackable**
 
 ---
 
-# Homebrew Support
+# 🧩 What I might want next
 
-Supports:
+(Useful for next chat)
 
-- local tap testing
-- published tap
-
-## Key distinction
-
-### Local testing
-
-Uses:
-
-```
-file://.../gitig-x.x.x.tgz
-```
-
-### Published
-
-Uses:
-
-```
-https://registry.npmjs.org/gitig/-/gitig-x.x.x.tgz
-```
-
----
-
-# Scripts
-
-### `release-homebrew.sh`
-
-Modes:
-
-```bash
---mode local   # for testing
---mode npm     # for real releases
-```
-
----
-
-### `install-homebrew-local.sh`
-
-- creates local git-backed tap
-- installs via:
-
-```bash
-brew install local/tap/gitig
-```
-
-- handles Apple Silicon (`arch -arm64`)
-
----
-
-# GitHub Actions
-
-- triggers on tags (`v*`)
-- builds
-- runs selftest
-- optionally publishes to npm (skips if no token)
-- updates Homebrew tap
-
----
-
-# Example Usage
-
-```bash
-gitig list --source gh
-gitig view gh:Node -nc
-gitig i gh: node python
-gitig i ghg: macos jetbrains
-gitig detect --source gh --include os,editor
-gitig compact
-gitig stats
-gitig doctor
-gitig selftest
-```
-
----
-
-# Next Possible Improvements
-
-Good next steps:
-
-- template-aware shell completion
-- GitHub Releases + changelog automation
-- version/tag consistency check
-- binary build (pkg / single-file)
-- faster catalog caching (ETag support)
-- plugin system (future)
+- delayed spinner start (avoid flicker)
+- `--json` for other commands
+- background auto-refresh
+- cache invalidation strategy
+- richer template metadata
+- better fuzzy search
 
 ---
