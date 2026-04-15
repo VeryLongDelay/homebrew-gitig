@@ -7,9 +7,10 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Callable, Literal
+from difflib import unified_diff
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -39,6 +40,7 @@ class Args:
     quiet: bool
     json_output: bool
     detect_includes: list[DetectInclude]
+    no_color: bool
 
 
 @dataclass
@@ -152,6 +154,8 @@ COMMANDS = [
     "license",
     "doctor",
     "stats",
+    "explain",
+    "diff",
     "check",
     "selftest",
     "completion",
@@ -351,6 +355,7 @@ def parse_args(argv: list[str]) -> Args:
     no_comments = False
     quiet = False
     json_output = False
+    no_color = False
     detect_includes: list[DetectInclude] = []
     filtered: list[str] = []
 
@@ -468,6 +473,11 @@ def parse_args(argv: list[str]) -> Args:
             i += 1
             continue
 
+        if arg in ("--no-color", "--no-colour"):
+            no_color = True
+            i += 1
+            continue
+
         filtered.append(arg)
         i += 1
 
@@ -490,6 +500,7 @@ def parse_args(argv: list[str]) -> Args:
         quiet=quiet,
         json_output=json_output,
         detect_includes=detect_includes,
+        no_color=no_color,
     )
 
 
@@ -544,6 +555,7 @@ class Spinner:
         "⠓",
     ]
     INTERVAL_SECONDS = 0.1
+    START_DELAY_SECONDS = 0.15
     SPINNER_COLOR = "\033[38;2;71;136;208m"
     DONE_COLOR = "\033[38;2;71;136;208m"
     FAIL_COLOR = "\033[31m"
@@ -563,10 +575,13 @@ class Spinner:
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._index = 0
+        self._rendered = False
+        self._lock = threading.Lock()
 
     def _write(self, text: str) -> None:
-        self.stream.write(text)
-        self.stream.flush()
+        with self._lock:
+            self.stream.write(text)
+            self.stream.flush()
 
     def _clear(self) -> None:
         self._write("\r\033[2K")
@@ -582,17 +597,20 @@ class Spinner:
         return self._colorize(frame, self.SPINNER_COLOR)
 
     def _render(self) -> None:
+        self._rendered = True
         self._write(f"\r\033[2K{self._frame()} {self.message}")
 
     def _run(self) -> None:
+        if self._done.wait(self.START_DELAY_SECONDS):
+            return
+        self._clear()
+        self._render()
         while not self._done.wait(self.INTERVAL_SECONDS):
             self._render()
 
     def __enter__(self) -> "Spinner":
         if not self.enabled:
             return self
-        self._clear()
-        self._render()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
@@ -603,31 +621,148 @@ class Spinner:
         self._done.set()
         if self._thread is not None:
             self._thread.join(timeout=0.2)
-        status = "done" if exc is None else "failed"
-        color = self.DONE_COLOR if exc is None else self.FAIL_COLOR
-        self._write(f"\r\033[2K{self._colorize(status, color)} {self.message}\n")
+        if self._rendered:
+            status = "done" if exc is None else "failed"
+            color = self.DONE_COLOR if exc is None else self.FAIL_COLOR
+            self._write(f"\r\033[2K{self._colorize(status, color)} {self.message}\n")
 
 
-def fetch_bytes(url: str, accept_json: bool = False, status: str | None = None, spinner_enabled: bool = True, no_color: bool | None = None) -> bytes:
+def maybe_start_background_refresh(name: str, loader: Callable[[], Any]) -> None:
+    if os.getenv("GITIG_DISABLE_BACKGROUND_REFRESH"):
+        return
+
+    def _run() -> None:
+        try:
+            loader()
+        except Exception:
+            return
+
+    thread = threading.Thread(target=_run, name=f"gitig-refresh-{name}", daemon=True)
+    thread.start()
+
+
+def load_with_cache_refresh(
+    cache_name: str,
+    ttl_ms: int,
+    no_cache: bool,
+    refresh_fn: Callable[[bool, bool | None], Any],
+    from_cache: Callable[[Any], Any],
+    no_color: bool | None = None,
+) -> tuple[Any, CacheStatus]:
+    cache_path = cache_path_for(cache_name)
+    cache = get_cache_status(cache_path, ttl_ms)
+    if not no_cache:
+        try:
+            cached = json.loads(cache_path.read_text("utf8")) if cache.exists else None
+        except Exception:
+            cached = None
+        if cached is not None:
+            value = from_cache(cached)
+            if not cache.fresh:
+                maybe_start_background_refresh(cache_name, lambda: refresh_fn(False, no_color))
+            return value, cache
+    value = refresh_fn(True, no_color)
+    return value, get_cache_status(cache_path, ttl_ms)
+
+
+def write_cache_payload(path: Path, payload: dict[str, Any]) -> None:
+    ensure_dir(CACHE_DIR)
+    wrapped = {
+        "meta": {
+            "etag": payload.get("etag"),
+            "last_modified": payload.get("last_modified"),
+            "fetched_at": int(time.time() * 1000),
+        },
+        "catalog": payload.get("catalog", []),
+    }
+    path.write_text(json.dumps(wrapped, indent=2), "utf8")
+
+
+def read_cache_payload(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text("utf8"))
+    except Exception:
+        return None
+    if not isinstance(value, dict):
+        return None
+    if "meta" in value and "catalog" in value:
+        meta = value.get("meta") if isinstance(value.get("meta"), dict) else {}
+        return {
+            "etag": meta.get("etag"),
+            "last_modified": meta.get("last_modified"),
+            "catalog": value.get("catalog", []),
+        }
+    if "catalog" in value:
+        return {
+            "etag": value.get("etag"),
+            "last_modified": value.get("last_modified"),
+            "catalog": value.get("catalog", []),
+        }
+    return None
+
+
+def fetch_bytes(
+    url: str,
+    accept_json: bool = False,
+    status: str | None = None,
+    spinner_enabled: bool = True,
+    no_color: bool | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[int, bytes, dict[str, str]]:
     headers = {"User-Agent": "gitig-python"}
     if accept_json:
         headers["Accept"] = "application/vnd.github+json"
+    if extra_headers:
+        headers.update(extra_headers)
     req = Request(url, headers=headers)
     try:
-        with Spinner(status or f"Fetching {url}", enabled=spinner_enabled, no_color=no_color), urlopen(req) as response:
-            return response.read()
+        with Spinner(status or f"Fetching {url}", enabled=spinner_enabled, no_color=no_color), urlopen(req, timeout=FETCH_TIMEOUT_SECONDS) as response:
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+            return response.status, response.read(), response_headers
     except HTTPError as exc:
+        if exc.code == 304:
+            response_headers = {key.lower(): value for key, value in exc.headers.items()}
+            return 304, b"", response_headers
         raise RuntimeError(f"Request failed: {exc.code} {exc.reason}") from exc
     except URLError as exc:
         raise RuntimeError(f"Request failed: {exc.reason}") from exc
 
 
-def fetch_json(url: str, status: str | None = None, spinner_enabled: bool = True, no_color: bool | None = None) -> Any:
-    return json.loads(fetch_bytes(url, accept_json=True, status=status, spinner_enabled=spinner_enabled, no_color=no_color).decode("utf8"))
+def fetch_json(
+    url: str,
+    status: str | None = None,
+    spinner_enabled: bool = True,
+    no_color: bool | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
+    _, body, _ = fetch_bytes(
+        url,
+        accept_json=True,
+        status=status,
+        spinner_enabled=spinner_enabled,
+        no_color=no_color,
+        extra_headers=extra_headers,
+    )
+    return json.loads(body.decode("utf8"))
 
 
-def fetch_text(url: str, status: str | None = None, spinner_enabled: bool = True, no_color: bool | None = None) -> str:
-    return fetch_bytes(url, status=status, spinner_enabled=spinner_enabled, no_color=no_color).decode("utf8")
+def fetch_text(
+    url: str,
+    status: str | None = None,
+    spinner_enabled: bool = True,
+    no_color: bool | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> str:
+    _, body, _ = fetch_bytes(
+        url,
+        status=status,
+        spinner_enabled=spinner_enabled,
+        no_color=no_color,
+        extra_headers=extra_headers,
+    )
+    return body.decode("utf8")
 
 
 def cache_path_for(name: str) -> Path:
@@ -639,6 +774,11 @@ def get_cache_status(path: Path, ttl_ms: int = DEFAULT_CACHE_TTL_MS) -> CacheSta
         return CacheStatus(False, False, None, ttl_ms, str(path))
     age_ms = int(time.time() * 1000 - path.stat().st_mtime * 1000)
     return CacheStatus(True, age_ms <= ttl_ms, age_ms, ttl_ms, str(path))
+
+
+def touch_cache_path(path: Path) -> None:
+    now = time.time()
+    os.utime(path, (now, now))
 
 
 def read_cache_json(path: Path, ttl_ms: int = DEFAULT_CACHE_TTL_MS) -> Any | None:
@@ -656,10 +796,31 @@ def write_cache_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2), "utf8")
 
 
-def refresh_github_catalog(spinner_enabled: bool = True) -> CatalogLoadResult:
+def refresh_github_catalog(spinner_enabled: bool = True, no_color: bool | None = None) -> CatalogLoadResult:
     cache_path = cache_path_for("github-catalog")
     ttl_ms = github_catalog_cache_ttl_ms()
-    tree = fetch_json(GITHUB_TREE_URL, "Refreshing GitHub template catalog", spinner_enabled=spinner_enabled)
+    cached = read_cache_payload(cache_path)
+    extra_headers: dict[str, str] = {}
+    if cached:
+        etag = cached.get("etag")
+        last_modified = cached.get("last_modified")
+        if etag:
+            extra_headers["If-None-Match"] = str(etag)
+        if last_modified:
+            extra_headers["If-Modified-Since"] = str(last_modified)
+    status_code, body, headers = fetch_bytes(
+        GITHUB_TREE_URL,
+        accept_json=True,
+        status="Refreshing GitHub template catalog",
+        spinner_enabled=spinner_enabled,
+        no_color=no_color,
+        extra_headers=extra_headers or None,
+    )
+    if status_code == 304 and cached is not None:
+        touch_cache_path(cache_path)
+        catalog = [catalog_entry_from_cache(entry) for entry in cached.get("catalog", [])]
+        return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
+    tree = json.loads(body.decode("utf8"))
     catalog: list[CatalogEntry] = []
     for item in tree["tree"]:
         if item.get("type") != "blob":
@@ -668,26 +829,51 @@ def refresh_github_catalog(spinner_enabled: bool = True) -> CatalogLoadResult:
         if entry is not None:
             catalog.append(entry)
     catalog.sort(key=lambda item: item.display_name.lower())
-    write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+    payload = {
+        "etag": headers.get("etag") or tree.get("sha"),
+        "last_modified": headers.get("last-modified"),
+        "catalog": [asdict(entry) for entry in catalog],
+    }
+    write_cache_payload(cache_path, payload)
     return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
-
-def refresh_gitignoreio_catalog(spinner_enabled: bool = True) -> CatalogLoadResult:
+def refresh_gitignoreio_catalog(spinner_enabled: bool = True, no_color: bool | None = None) -> CatalogLoadResult:
     cache_path = cache_path_for("gitignoreio-catalog")
     ttl_ms = gitignoreio_catalog_cache_ttl_ms()
-    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Refreshing gitignore.io template catalog", spinner_enabled=spinner_enabled)
+    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Refreshing gitignore.io template catalog", spinner_enabled=spinner_enabled, no_color=no_color)
     keys = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
     catalog = [
         CatalogEntry("gitignoreio", key, key, key, unique_sorted([key, f"tt:{key}", f"gitignoreio:{key}"]))
         for key in unique_sorted(keys)
     ]
-    write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+    payload = {"etag": None, "catalog": [asdict(entry) for entry in catalog]}
+    write_cache_payload(cache_path, payload)
     return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
-
-def refresh_license_catalog(spinner_enabled: bool = True) -> list[LicenseCatalogEntry]:
+def refresh_license_catalog(spinner_enabled: bool = True, no_color: bool | None = None) -> list[LicenseCatalogEntry]:
     cache_path = cache_path_for("license-catalog")
-    tree = fetch_json(LICENSE_TREE_URL, "Refreshing license catalog", spinner_enabled=spinner_enabled)
+    cached = read_cache_payload(cache_path)
+    extra_headers: dict[str, str] = {}
+    if cached:
+        etag = cached.get("etag")
+        last_modified = cached.get("last_modified")
+        if etag:
+            extra_headers["If-None-Match"] = str(etag)
+        if last_modified:
+            extra_headers["If-Modified-Since"] = str(last_modified)
+    status_code, body, headers = fetch_bytes(
+        LICENSE_TREE_URL,
+        accept_json=True,
+        status="Refreshing license catalog",
+        spinner_enabled=spinner_enabled,
+        no_color=no_color,
+        extra_headers=extra_headers or None,
+    )
+    if status_code == 304 and cached is not None:
+        touch_cache_path(cache_path)
+        catalog = [license_catalog_entry_from_cache(entry) for entry in cached.get("catalog", [])]
+        return [entry for entry in catalog if not entry.hidden]
+    tree = json.loads(body.decode("utf8"))
     paths = sorted(
         item["path"]
         for item in tree["tree"]
@@ -700,13 +886,20 @@ def refresh_license_catalog(spinner_enabled: bool = True) -> list[LicenseCatalog
                 f"{LICENSE_RAW_BASE}/{path}",
                 f"Refreshing license metadata {path.removeprefix('_licenses/').removesuffix('.txt')}",
                 spinner_enabled=spinner_enabled,
+                no_color=no_color,
             ),
         )
         for path in paths
     ]
-    write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+    write_cache_payload(
+        cache_path,
+        {
+            "etag": headers.get("etag") or tree.get("sha"),
+            "last_modified": headers.get("last-modified"),
+            "catalog": [asdict(entry) for entry in catalog],
+        },
+    )
     return [entry for entry in catalog if not entry.hidden]
-
 
 def _normalize_update_target(target: str | None) -> str:
     normalized = (target or "all").strip().lower()
@@ -738,16 +931,26 @@ def cmd_update_catalog(target: str | None = None, quiet: bool = False, json_outp
     normalized = _normalize_update_target(target)
     spinner_enabled = not json_output
 
+    github_refresh_result: CatalogLoadResult | None = None
+    github_refresh_lock = threading.Lock()
+
+    def get_refreshed_github() -> CatalogLoadResult:
+        nonlocal github_refresh_result
+        with github_refresh_lock:
+            if github_refresh_result is None:
+                github_refresh_result = refresh_github_catalog(spinner_enabled=False)
+            return github_refresh_result
+
     def refresh_target(name: str) -> dict[str, Any]:
         if name == "github":
-            github = refresh_github_catalog(spinner_enabled=False)
+            github = get_refreshed_github()
             return _build_update_result("github", len(github.catalog), cache_path_for("github-catalog"))
         if name == "github-global":
-            github = refresh_github_catalog(spinner_enabled=False)
+            github = get_refreshed_github()
             count = len([entry for entry in github.catalog if entry.github_scope == "global"])
             return _build_update_result("github-global", count, cache_path_for("github-catalog"))
         if name == "github-community":
-            github = refresh_github_catalog(spinner_enabled=False)
+            github = get_refreshed_github()
             count = len([entry for entry in github.catalog if entry.github_scope == "community"])
             return _build_update_result("github-community", count, cache_path_for("github-catalog"))
         if name == "gitignoreio":
@@ -854,48 +1057,25 @@ def filter_github_catalog_by_scope(catalog: list[CatalogEntry], scope: GitHubSco
     return [entry for entry in catalog if entry.github_scope == scope]
 
 
-def get_github_catalog_with_cache(no_cache: bool) -> CatalogLoadResult:
-    cache_path = cache_path_for("github-catalog")
+def get_github_catalog_with_cache(no_cache: bool, no_color: bool | None = None) -> CatalogLoadResult:
     ttl_ms = github_catalog_cache_ttl_ms()
-    cache = get_cache_status(cache_path, ttl_ms)
-    if not no_cache:
-        cached = read_cache_json(cache_path, ttl_ms)
-        if cached is not None:
-            catalog = [catalog_entry_from_cache(entry) for entry in cached]
-            return CatalogLoadResult(catalog, cache)
-    tree = fetch_json(GITHUB_TREE_URL, "Fetching GitHub template catalog")
-    catalog: list[CatalogEntry] = []
-    for item in tree["tree"]:
-        if item.get("type") != "blob":
-            continue
-        entry = classify_github_template(item["path"])
-        if entry is not None:
-            catalog.append(entry)
-    catalog.sort(key=lambda item: item.display_name.lower())
-    if not no_cache:
-        write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
-    return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
+    def from_cache(payload: Any) -> list[CatalogEntry]:
+        catalog = payload.get("catalog", payload)
+        return [catalog_entry_from_cache(entry) for entry in catalog]
 
-def get_gitignoreio_catalog_with_cache(no_cache: bool) -> CatalogLoadResult:
-    cache_path = cache_path_for("gitignoreio-catalog")
+    catalog, cache = load_with_cache_refresh("github-catalog", ttl_ms, no_cache, refresh_github_catalog, from_cache, no_color)
+    return CatalogLoadResult(catalog, cache)
+
+def get_gitignoreio_catalog_with_cache(no_cache: bool, no_color: bool | None = None) -> CatalogLoadResult:
     ttl_ms = gitignoreio_catalog_cache_ttl_ms()
-    cache = get_cache_status(cache_path, ttl_ms)
-    if not no_cache:
-        cached = read_cache_json(cache_path, ttl_ms)
-        if cached is not None:
-            catalog = [catalog_entry_from_cache(entry) for entry in cached]
-            return CatalogLoadResult(catalog, cache)
-    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Fetching gitignore.io template catalog")
-    keys = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
-    catalog = [
-        CatalogEntry("gitignoreio", key, key, key, unique_sorted([key, f"tt:{key}", f"gitignoreio:{key}"]))
-        for key in unique_sorted(keys)
-    ]
-    if not no_cache:
-        write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
-    return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
+    def from_cache(payload: Any) -> list[CatalogEntry]:
+        catalog = payload.get("catalog", payload)
+        return [catalog_entry_from_cache(entry) for entry in catalog]
+
+    catalog, cache = load_with_cache_refresh("gitignoreio-catalog", ttl_ms, no_cache, refresh_gitignoreio_catalog, from_cache, no_color)
+    return CatalogLoadResult(catalog, cache)
 
 def get_catalog(source: SourceName, no_cache: bool) -> list[CatalogEntry]:
     if source in ("github", "github-global", "github-community"):
@@ -1005,21 +1185,25 @@ def shortlist_suggestion_candidates(query: str, values: list[str], limit: int = 
     return [value for _, value in ranked[:limit]]
 
 
-def format_suggestions(query: str, catalog: list[CatalogEntry]) -> str:
+def fuzzy_match_score(query: str, candidate: str) -> int:
     q = normalize_loose(query)
+    c = normalize_loose(candidate)
+    if not q or not c:
+        return max(len(q), len(c))
+    contains_bonus = 0 if (q in c or c in q) else 3
+    prefix_bonus = 0 if c.startswith(q[: min(len(q), 3)]) else 2
+    length_gap = abs(len(c) - len(q)) // 2
+    return levenshtein(q, c) + contains_bonus + prefix_bonus + length_gap
+
+
+def format_suggestions(query: str, catalog: list[CatalogEntry]) -> str:
     shortlisted = set(shortlist_suggestion_candidates(query, [entry.display_name for entry in catalog]))
     ranked: list[tuple[int, CatalogEntry]] = []
     for entry in catalog:
         if shortlisted and entry.display_name not in shortlisted:
             continue
-        scores = []
-        for candidate in [entry.display_name, *entry.aliases]:
-            normalized_candidate = normalize_loose(candidate)
-            if normalized_candidate in q or q in normalized_candidate:
-                scores.append(0)
-            else:
-                scores.append(levenshtein(q, normalized_candidate))
-        ranked.append((min(scores), entry))
+        score = min(fuzzy_match_score(query, candidate) for candidate in [entry.display_name, *entry.aliases])
+        ranked.append((score, entry))
     ranked.sort(key=lambda item: (item[0], item[1].display_name.lower()))
     suggestions = [item[1] for item in ranked[:5]]
     if not suggestions:
@@ -1112,7 +1296,7 @@ def parse_template_args(parts: list[str]) -> list[str]:
 
 
 def build_init_content(raw_names: list[str], source: SourceName, no_cache: bool, no_comments: bool) -> str:
-    requested_names = parse_template_args(raw_names)
+    requested_names = parse_template_args(expand_preset_bundles(raw_names))
     if not requested_names:
         raise ValueError("Please provide at least one template name")
     effective_sources: list[SourceName] = []
@@ -1276,9 +1460,10 @@ def get_license_catalog(no_cache: bool) -> list[LicenseCatalogEntry]:
     cache_path = cache_path_for("license-catalog")
     ttl_ms = license_catalog_cache_ttl_ms()
     if not no_cache:
-        cached = read_cache_json(cache_path, ttl_ms)
+        cached = read_cache_payload(cache_path)
         if cached is not None:
-            return [license_catalog_entry_from_cache(entry) for entry in cached if not entry.get("hidden", False)]
+            catalog = cached.get("catalog", cached)
+            return [license_catalog_entry_from_cache(entry) for entry in catalog if not entry.get("hidden", False)]
     tree = fetch_json(LICENSE_TREE_URL, "Fetching license catalog")
     paths = sorted(
         item["path"]
@@ -1287,7 +1472,7 @@ def get_license_catalog(no_cache: bool) -> list[LicenseCatalogEntry]:
     )
     catalog = [build_license_catalog_entry(path, fetch_text(f"{LICENSE_RAW_BASE}/{path}", f"Fetching license metadata {path.removeprefix('_licenses/').removesuffix('.txt')}")) for path in paths]
     if not no_cache:
-        write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+        write_cache_payload(cache_path, {"etag": None, "catalog": [asdict(entry) for entry in catalog]})
     return [entry for entry in catalog if not entry.hidden]
 
 
@@ -1353,6 +1538,98 @@ def resolve_license_invocation(rest: list[str]) -> tuple[str, list[str]]:
     if first in ("list", "search", "view", "init"):
         return first, rest[1:]
     raise ValueError(f'Unknown license subcommand or target: {rest[0]}. Use "license list", "license search", "license view", or "license init".')
+
+
+
+PRESET_BUNDLES = {
+    "python": ["gh:Python"],
+    "node": ["gh:Node"],
+    "bun": ["gh:Node"],
+    "rust": ["gh:Rust"],
+    "go": ["gh:Go"],
+    "web": ["gh:Node", "ghg:VisualStudioCode"],
+    "python-web": ["gh:Python", "ghg:VisualStudioCode"],
+    "mac-web": ["gh:Node", "ghg:macOS", "ghg:VisualStudioCode"],
+}
+
+
+def expand_preset_bundles(raw_names: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for name in raw_names:
+        key = name.strip().lower()
+        if key in PRESET_BUNDLES:
+            expanded.extend(PRESET_BUNDLES[key])
+            continue
+        expanded.append(name)
+    return expanded
+
+
+def cmd_explain(name: str, source: SourceName, no_cache: bool) -> None:
+    provider, scope, _ = parse_provider_prefix(name)
+    effective_source: SourceName = (
+        "gitignoreio" if provider == "gitignoreio" else
+        "github-global" if scope == "global" else
+        "github-community" if scope == "community" else
+        "github" if provider == "github" else
+        assert_single_source(source, "explain")
+    )
+    catalog = get_catalog(effective_source, no_cache)
+    entry = resolve_entry(name, catalog)
+    if entry is None:
+        print(f"Template not found: {name}", file=sys.stderr)
+        suggestions = format_suggestions(name, catalog)
+        if suggestions:
+            print(suggestions, file=sys.stderr)
+        raise SystemExit(1)
+    content = get_github_template_content(entry.key) if entry.source == "github" else get_gitignoreio_template_content([entry.key])
+    lines = content.replace("\r\n", "\n").split("\n")
+    ignore_rules = [line for line in lines if line.strip() and not is_comment_line(line.strip())]
+    comments = [line.strip().removeprefix("#").strip() for line in lines if is_comment_line(line.strip())][:5]
+    print(f"Template: {entry.display_name}")
+    print(f"Source: {entry.source}")
+    print(f"Rules: {len(ignore_rules)}")
+    if comments:
+        print("Notes:")
+        for item in comments:
+            print(f"- {item}")
+    preview = ignore_rules[:10]
+    if preview:
+        print("Includes:")
+        for item in preview:
+            print(f"- {item}")
+
+
+def cmd_diff(left: str, right: str, source: SourceName, no_cache: bool, no_comments: bool) -> None:
+    def resolve_content(name: str) -> tuple[str, str]:
+        provider, scope, _ = parse_provider_prefix(name)
+        effective_source: SourceName = (
+            "gitignoreio" if provider == "gitignoreio" else
+            "github-global" if scope == "global" else
+            "github-community" if scope == "community" else
+            "github" if provider == "github" else
+            assert_single_source(source, "diff")
+        )
+        catalog = get_catalog(effective_source, no_cache)
+        entry = resolve_entry(name, catalog)
+        if entry is None:
+            print(f"Template not found: {name}", file=sys.stderr)
+            suggestions = format_suggestions(name, catalog)
+            if suggestions:
+                print(suggestions, file=sys.stderr)
+            raise SystemExit(1)
+        content = get_github_template_content(entry.key) if entry.source == "github" else get_gitignoreio_template_content([entry.key])
+        return entry.display_name, apply_no_comments(content, no_comments)
+
+    left_name, left_content = resolve_content(left)
+    right_name, right_content = resolve_content(right)
+    diff = unified_diff(
+        left_content.splitlines(),
+        right_content.splitlines(),
+        fromfile=left_name,
+        tofile=right_name,
+        lineterm="",
+    )
+    sys.stdout.write("\n".join(diff) + "\n")
 
 
 def cmd_list(source: SourceName, no_cache: bool) -> None:
@@ -1590,7 +1867,7 @@ def get_platform_summary() -> str:
     return f"{system} (Unix-like)"
 
 
-def cmd_doctor(no_cache: bool) -> None:
+def cmd_doctor(no_cache: bool, json_output: bool = False) -> None:
     env_checks: list[DoctorCheck] = [
         DoctorCheck("cache directory", can_read_write_dir(CACHE_DIR), f"{CACHE_DIR}"),
         DoctorCheck("platform", True, get_platform_summary()),
@@ -1609,13 +1886,25 @@ def cmd_doctor(no_cache: bool) -> None:
         except Exception as exc:
             detect_checks.append(DoctorCheck(label, False, str(exc)))
     completion_checks = [DoctorCheck(f"{shell_name} completion target", True, str(get_completion_install_target(shell_name)[0])) for shell_name in SHELLS]
+    all_checks = env_checks + provider_checks + detect_checks + completion_checks
+    failed = len([check for check in all_checks if not check.ok])
+    if json_output:
+        payload = {
+            "environment": [asdict(check) for check in env_checks],
+            "providers": [asdict(check) for check in provider_checks],
+            "detection": [asdict(check) for check in detect_checks],
+            "completions": [asdict(check) for check in completion_checks],
+            "summary": {"passed": len(all_checks) - failed, "total": len(all_checks)},
+        }
+        print(json.dumps(payload, indent=2))
+        if failed:
+            raise SystemExit(1)
+        return
     print("gitig doctor")
     print_doctor_checks("Environment", env_checks)
     print_doctor_checks("Providers", provider_checks)
     print_doctor_checks("Detection", detect_checks)
     print_doctor_checks("Completions", completion_checks)
-    all_checks = env_checks + provider_checks + detect_checks + completion_checks
-    failed = len([check for check in all_checks if not check.ok])
     print(f"\nSummary: {len(all_checks) - failed}/{len(all_checks)} checks passed")
     if failed:
         raise SystemExit(1)
@@ -1634,7 +1923,7 @@ def print_stats_table(rows: list[StatsRow]) -> None:
         print(f"{pad_right(row.label, label_width)}  {pad_right(str(row.count), count_width)}")
 
 
-def cmd_stats(source: SourceName, no_cache: bool) -> None:
+def cmd_stats(source: SourceName, no_cache: bool, json_output: bool = False) -> None:
     if source == "all":
         github = get_github_catalog_with_cache(no_cache)
         gitignoreio = get_gitignoreio_catalog_with_cache(no_cache)
@@ -1854,10 +2143,18 @@ def main() -> None:
             })
             return
         if command == "doctor":
-            cmd_doctor(parsed.no_cache)
+            cmd_doctor(parsed.no_cache, json_output=parsed.json_output)
             return
         if command == "stats":
-            cmd_stats(parsed.source, parsed.no_cache)
+            cmd_stats(parsed.source, parsed.no_cache, json_output=parsed.json_output)
+            return
+        if command == "explain":
+            cmd_explain(" ".join(parsed.rest), parsed.source, parsed.no_cache)
+            return
+        if command == "diff":
+            if len(parsed.rest) < 2:
+                raise ValueError("diff requires two templates")
+            cmd_diff(parsed.rest[0], parsed.rest[1], parsed.source, parsed.no_cache, parsed.no_comments)
             return
         if command in ("check", "selftest"):
             cmd_selftest()
