@@ -29,6 +29,7 @@ I am building a CLI tool called **`gitig`** for generating and managing `.gitign
 
 # Tech Stack
 
+<<<<<<< HEAD
 - **Node.js + TypeScript (no Bun)**
 - compiled to:
 
@@ -38,6 +39,16 @@ I am building a CLI tool called **`gitig`** for generating and managing `.gitign
 
 - single CLI entrypoint
 - minimal dependencies (ideally none at runtime)
+=======
+- **Python 3**
+- primary CLI entrypoint:
+
+  ```
+  gitig.py
+  ```
+
+- standard library only at runtime
+>>>>>>> python
 
 ---
 
@@ -45,7 +56,11 @@ I am building a CLI tool called **`gitig`** for generating and managing `.gitign
 
 - fast CLI startup
 - zero / minimal runtime dependencies
+<<<<<<< HEAD
 - strict TypeScript safety (no “possibly undefined”)
+=======
+- minimal runtime dependencies
+>>>>>>> python
 - small readable functions
 - case-insensitive matching
 - good CLI ergonomics
@@ -64,7 +79,11 @@ bare template args (prints generated `.gitignore` to stdout)
 init (aliases: I, i)
 detect
 compact
+<<<<<<< HEAD
 license (subcommands: list, search, view, init; bare `license <name>` aliases init)
+=======
+license (subcommands: list, search, view, init; bare `license` aliases list)
+>>>>>>> python
 doctor
 stats
 check

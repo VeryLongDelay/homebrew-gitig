@@ -1,5 +1,7 @@
 .brew/*
 gitig*.tgz
+.brew/*
+gitig*.tgz
 src/generated/*
 logs
 *.log
@@ -84,5 +86,3 @@ Icon[
 Network Trash Folder
 Temporary Items
 .apdisk
-Icon[
-]

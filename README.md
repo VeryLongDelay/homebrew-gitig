@@ -1,6 +1,6 @@
 # gitig
 
-`gitig` is an ignorant Node-based CLI for generating `.gitignore` and `LICENSE` files.
+`gitig` is an ignorant Python CLI for generating `.gitignore` and `LICENSE` files.
 
 It can:
 
@@ -15,8 +15,8 @@ It can:
 
 ## Features
 
-- Node + TypeScript
-- single-file CLI source (`gitig.ts`)
+- Python 3
+- primary CLI entrypoint: `gitig.py`
 - minimal dependencies
 - case-insensitive template matching
 - sticky provider prefixes such as `gh: node python`
@@ -29,23 +29,7 @@ It can:
 ### From a local checkout
 
 ```bash
-npm install
-npm run build
-node dist/gitig.js help
-```
-
-To use it like a normal global CLI from a local checkout:
-
-```bash
-npm link
-gitig help
-```
-
-### After publishing to npm
-
-```bash
-npm install -g gitig
-gitig help
+python3 gitig.py help
 ```
 
 ## Commands
@@ -113,6 +97,8 @@ gitig -c
 gitig compact .gitignore
 gitig compact .gitignore --output .gitignore.clean --force
 
+gitig li mit --fullname "Jane Doe"
+gitig -li mit --fullname "Jane Doe"
 gitig license list
 gitig license search apache
 gitig license view mit
