@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform as py_platform
 import sys
 import threading
 import time
@@ -36,7 +35,6 @@ class Args:
     source: SourceName
     no_cache: bool
     no_comments: bool
-    no_color: bool
     detect_includes: list[DetectInclude]
 
 
@@ -136,7 +134,8 @@ LICENSE_RAW_BASE = f"https://raw.githubusercontent.com/{LICENSE_REPO}/{LICENSE_B
 ROOT = Path(__file__).resolve().parent
 SRC_DIR = ROOT / "src"
 CACHE_DIR = Path.home() / ".cache" / "gitig"
-CACHE_TTL_MS = 1000 * 60 * 60 * 24
+DEFAULT_CACHE_TTL_MS = 1000 * 60 * 60 * 24
+FETCH_TIMEOUT_SECONDS = 15
 
 COMMANDS = [
     "list",
@@ -155,6 +154,8 @@ COMMANDS = [
     "completion",
     "install-completion",
     "help",
+    "update-catalog",
+    "refresh-catalog",
 ]
 
 SOURCE_ALIASES = {
@@ -192,6 +193,10 @@ Commands:
   completion <bash|zsh|fish>
   install-completion <bash|zsh|fish>
   help
+  update-catalog [all|github|gitignoreio|license]
+  refresh-catalog [all|github|gitignoreio|license]
+  update-catalog [all|github|gitignoreio|license]
+  refresh-catalog [all|github|gitignoreio|license]
 
 Examples:
   gitig gh:Node
@@ -202,14 +207,14 @@ Examples:
   gitig li mit --fullname "Jane Doe"
   gitig license
   gitig license init mit --fullname "Jane Doe" --year 2026
+  gitig update-catalog
+  gitig update-catalog license
 
 Flags:
   -o, --output <file>
   -f, --force
   -a, --append
   -n, -nc, --no-comments
-  --no-color
-  --no-colour
   -c
   -s, --source <gh|ghg|ghc|tt|all>
   --include <os,editor>
@@ -226,7 +231,7 @@ Notes:
   Bare template invocation writes to stdout by default.
   Use -a to append to .gitignore.
   Use gh, ghg, ghc, and tt as provider aliases.
-  NO_COLOR / NO_COLOUR disable spinner colors.
+  update-catalog refreshes cached catalogs on demand.
 """,
     "completions/bash.txt": """_gitig_template_stub() {
   COMPREPLY=()
@@ -335,7 +340,6 @@ def parse_args(argv: list[str]) -> Args:
     source: SourceName | None = None
     no_cache = False
     no_comments = False
-    no_color = False
     detect_includes: list[DetectInclude] = []
     filtered: list[str] = []
 
@@ -347,6 +351,7 @@ def parse_args(argv: list[str]) -> Args:
             filtered.append("compact")
             i += 1
             continue
+
 
         if arg == "li" and not filtered:
             filtered.extend(["license", "init"])
@@ -442,11 +447,6 @@ def parse_args(argv: list[str]) -> Args:
             i += 1
             continue
 
-        if arg in ("--no-color", "--no-colour"):
-            no_color = True
-            i += 1
-            continue
-
         filtered.append(arg)
         i += 1
 
@@ -466,7 +466,6 @@ def parse_args(argv: list[str]) -> Args:
         source=source or default_source_for_command(command),
         no_cache=no_cache,
         no_comments=no_comments,
-        no_color=no_color,
         detect_includes=detect_includes,
     )
 
@@ -485,9 +484,27 @@ def path_exists(path: str | Path) -> bool:
     return Path(path).exists()
 
 
-def spinner_color_disabled() -> bool:
-    return bool(os.getenv("NO_COLOR") or os.getenv("NO_COLOUR"))
+def get_cache_ttl_ms(env_name: str, default_ms: int = DEFAULT_CACHE_TTL_MS) -> int:
+    raw = os.getenv(env_name)
+    if raw is None or not raw.strip():
+        return default_ms
+    try:
+        seconds = int(raw.strip())
+    except ValueError:
+        return default_ms
+    return max(0, seconds * 1000)
 
+
+def github_catalog_cache_ttl_ms() -> int:
+    return get_cache_ttl_ms("GITIG_GITHUB_CATALOG_CACHE_TTL_SECONDS")
+
+
+def gitignoreio_catalog_cache_ttl_ms() -> int:
+    return get_cache_ttl_ms("GITIG_GITIGNOREIO_CATALOG_CACHE_TTL_SECONDS")
+
+
+def license_catalog_cache_ttl_ms() -> int:
+    return get_cache_ttl_ms("GITIG_LICENSE_CATALOG_CACHE_TTL_SECONDS")
 
 class Spinner:
     FRAMES = [
@@ -505,7 +522,7 @@ class Spinner:
     INTERVAL_SECONDS = 0.1
     FALLBACK_PREFIX = "  "
 
-    SPINNER_COLOR = "\033[38;2;71;136;208m"
+    SPINNER_COLOR = "\033[38;2;71;136;208m"  # #4788d0
     DONE_COLOR = "\033[38;2;71;136;208m"
     FAIL_COLOR = "\033[31m"
     RESET = "\033[0m"
@@ -522,7 +539,10 @@ class Spinner:
         self.enabled = bool(
             enabled if enabled is not None else hasattr(self.stream, "isatty") and self.stream.isatty()
         )
-        self.no_color = bool(no_color) if no_color is not None else spinner_color_disabled()
+        self.no_color = bool(no_color) if no_color is not None else (
+            bool(os.getenv("NO_COLOR") or os.getenv("NO_COLOUR"))
+        )
+
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._index = 0
@@ -531,21 +551,21 @@ class Spinner:
         self.stream.write(text)
         self.stream.flush()
 
-    def _clear_line(self) -> None:
+    def _clear(self) -> None:
         self._write("\r\033[2K")
 
-    def _colorize(self, text: str, color: str) -> str:
+    def _color(self, text: str, color: str) -> str:
         if self.no_color or not self.enabled:
             return text
         return f"{color}{text}{self.RESET}"
 
-    def _next_frame(self) -> str:
-        frame = self.FRAMES[self._index % len(self.FRAMES)]
+    def _frame(self) -> str:
+        frame = self.FRAMES[self._index]
         self._index = (self._index + 1) % len(self.FRAMES)
-        return self._colorize(frame, self.SPINNER_COLOR)
+        return self._color(frame, self.SPINNER_COLOR)
 
     def _render(self) -> None:
-        self._write(f"\r\033[2K{self._next_frame()} {self.message}")
+        self._write(f"\r\033[2K{self._frame()} {self.message}")
 
     def _run(self) -> None:
         while not self._done.wait(self.INTERVAL_SECONDS):
@@ -553,11 +573,13 @@ class Spinner:
 
     def __enter__(self) -> "Spinner":
         if not self.enabled:
+            # simple fallback (no animation)
             self._write(f"{self.FALLBACK_PREFIX}{self.FRAMES[0]} {self.message}")
             return self
 
-        self._clear_line()
+        self._clear()
         self._render()
+
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
@@ -565,7 +587,7 @@ class Spinner:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._done.set()
 
-        if self._thread is not None:
+        if self._thread:
             self._thread.join(timeout=0.2)
 
         if not self.enabled:
@@ -573,23 +595,17 @@ class Spinner:
             return
 
         status = "done" if exc is None else "failed"
-        status_color = self.DONE_COLOR if exc is None else self.FAIL_COLOR
-        status_text = self._colorize(status, status_color)
-        self._write(f"\r\033[2K{status_text} {self.message}\n")
+        color = self.DONE_COLOR if exc is None else self.FAIL_COLOR
 
+        self._write(f"\r\033[2K{self._color(status, color)} {self.message}\n")
 
-def fetch_bytes(
-    url: str,
-    accept_json: bool = False,
-    status: str | None = None,
-    no_color: bool = False,
-) -> bytes:
+def fetch_bytes(url: str, accept_json: bool = False, status: str | None = None) -> bytes:
     headers = {"User-Agent": "gitig-python"}
     if accept_json:
         headers["Accept"] = "application/vnd.github+json"
     req = Request(url, headers=headers)
     try:
-        with Spinner(status or f"Fetching {url}", no_color=no_color), urlopen(req) as response:
+        with Spinner(status or f"Fetching {url}"), urlopen(req) as response:
             return response.read()
     except HTTPError as exc:
         raise RuntimeError(f"Request failed: {exc.code} {exc.reason}") from exc
@@ -597,27 +613,27 @@ def fetch_bytes(
         raise RuntimeError(f"Request failed: {exc.reason}") from exc
 
 
-def fetch_json(url: str, status: str | None = None, no_color: bool = False) -> Any:
-    return json.loads(fetch_bytes(url, accept_json=True, status=status, no_color=no_color).decode("utf8"))
+def fetch_json(url: str, status: str | None = None) -> Any:
+    return json.loads(fetch_bytes(url, accept_json=True, status=status).decode("utf8"))
 
 
-def fetch_text(url: str, status: str | None = None, no_color: bool = False) -> str:
-    return fetch_bytes(url, status=status, no_color=no_color).decode("utf8")
+def fetch_text(url: str, status: str | None = None) -> str:
+    return fetch_bytes(url, status=status).decode("utf8")
 
 
 def cache_path_for(name: str) -> Path:
     return CACHE_DIR / f"{name}.json"
 
 
-def get_cache_status(path: Path) -> CacheStatus:
+def get_cache_status(path: Path, ttl_ms: int = DEFAULT_CACHE_TTL_MS) -> CacheStatus:
     if not path.exists():
-        return CacheStatus(False, False, None, CACHE_TTL_MS, str(path))
+        return CacheStatus(False, False, None, ttl_ms, str(path))
     age_ms = int(time.time() * 1000 - path.stat().st_mtime * 1000)
-    return CacheStatus(True, age_ms <= CACHE_TTL_MS, age_ms, CACHE_TTL_MS, str(path))
+    return CacheStatus(True, age_ms <= ttl_ms, age_ms, ttl_ms, str(path))
 
 
-def read_cache_json(path: Path) -> Any | None:
-    status = get_cache_status(path)
+def read_cache_json(path: Path, ttl_ms: int = DEFAULT_CACHE_TTL_MS) -> Any | None:
+    status = get_cache_status(path, ttl_ms)
     if not status.exists or not status.fresh:
         return None
     try:
@@ -629,6 +645,90 @@ def read_cache_json(path: Path) -> Any | None:
 def write_cache_json(path: Path, value: Any) -> None:
     ensure_dir(CACHE_DIR)
     path.write_text(json.dumps(value, indent=2), "utf8")
+
+
+def refresh_github_catalog() -> CatalogLoadResult:
+    cache_path = cache_path_for("github-catalog")
+    ttl_ms = github_catalog_cache_ttl_ms()
+    tree = fetch_json(GITHUB_TREE_URL, "Refreshing GitHub template catalog")
+    catalog: list[CatalogEntry] = []
+    for item in tree["tree"]:
+        if item.get("type") != "blob":
+            continue
+        entry = classify_github_template(item["path"])
+        if entry is not None:
+            catalog.append(entry)
+    catalog.sort(key=lambda item: item.display_name.lower())
+    write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+    return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
+
+
+def refresh_gitignoreio_catalog() -> CatalogLoadResult:
+    cache_path = cache_path_for("gitignoreio-catalog")
+    ttl_ms = gitignoreio_catalog_cache_ttl_ms()
+    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Refreshing gitignore.io template catalog")
+    keys = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
+    catalog = [
+        CatalogEntry("gitignoreio", key, key, key, unique_sorted([key, f"tt:{key}", f"gitignoreio:{key}"]))
+        for key in unique_sorted(keys)
+    ]
+    write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+    return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
+
+
+def refresh_license_catalog() -> list[LicenseCatalogEntry]:
+    cache_path = cache_path_for("license-catalog")
+    tree = fetch_json(LICENSE_TREE_URL, "Refreshing license catalog")
+    paths = sorted(
+        item["path"]
+        for item in tree["tree"]
+        if item.get("type") == "blob" and item["path"].startswith("_licenses/") and item["path"].endswith(".txt")
+    )
+    catalog = [
+        build_license_catalog_entry(
+            path,
+            fetch_text(
+                f"{LICENSE_RAW_BASE}/{path}",
+                f"Refreshing license metadata {path.removeprefix('_licenses/').removesuffix('.txt')}",
+            ),
+        )
+        for path in paths
+    ]
+    write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
+    return [entry for entry in catalog if not entry.hidden]
+
+
+def cmd_update_catalog(target: str | None = None) -> None:
+    normalized = (target or "all").strip().lower()
+    if normalized in ("all", ""):
+        github = refresh_github_catalog()
+        gitignoreio = refresh_gitignoreio_catalog()
+        licenses = refresh_license_catalog()
+        print(f"Updated github catalog ({len(github.catalog)} templates)")
+        print(f"Updated gitignore.io catalog ({len(gitignoreio.catalog)} templates)")
+        print(f"Updated license catalog ({len(licenses)} licenses)")
+        return
+    if normalized in ("github", "gh", "github-global", "ghg", "github-community", "ghc"):
+        github = refresh_github_catalog()
+        if normalized in ("github-global", "ghg"):
+            count = len([entry for entry in github.catalog if entry.github_scope == "global"])
+            print(f"Updated github global catalog ({count} templates)")
+            return
+        if normalized in ("github-community", "ghc"):
+            count = len([entry for entry in github.catalog if entry.github_scope == "community"])
+            print(f"Updated github community catalog ({count} templates)")
+            return
+        print(f"Updated github catalog ({len(github.catalog)} templates)")
+        return
+    if normalized in ("gitignoreio", "tt"):
+        gitignoreio = refresh_gitignoreio_catalog()
+        print(f"Updated gitignore.io catalog ({len(gitignoreio.catalog)} templates)")
+        return
+    if normalized in ("license", "licenses"):
+        licenses = refresh_license_catalog()
+        print(f"Updated license catalog ({len(licenses)} licenses)")
+        return
+    raise ValueError("update-catalog requires one of: all, github, github-global, github-community, gitignoreio, license")
 
 
 def format_age_ms(age_ms: int | None) -> str:
@@ -663,43 +763,11 @@ def classify_github_template(path: str) -> CatalogEntry | None:
     if path.startswith("Global/"):
         relative = path[len("Global/") : -len(".gitignore")]
         full = path[:-len(".gitignore")]
-        return CatalogEntry(
-            "github",
-            full,
-            path,
-            full,
-            unique_sorted(
-                [
-                    full,
-                    relative,
-                    f"{relative}.gitignore",
-                    f"Global/{relative}",
-                    f"ghg:{relative}",
-                    f"github-global:{relative}",
-                ]
-            ),
-            "global",
-        )
+        return CatalogEntry("github", full, path, full, unique_sorted([full, relative, f"{relative}.gitignore", f"Global/{relative}", f"ghg:{relative}", f"github-global:{relative}"]), "global")
     if path.startswith("community/"):
         relative = path[len("community/") : -len(".gitignore")]
         full = path[:-len(".gitignore")]
-        return CatalogEntry(
-            "github",
-            full,
-            path,
-            full,
-            unique_sorted(
-                [
-                    full,
-                    relative,
-                    f"{relative}.gitignore",
-                    f"community/{relative}",
-                    f"ghc:{relative}",
-                    f"github-community:{relative}",
-                ]
-            ),
-            "community",
-        )
+        return CatalogEntry("github", full, path, full, unique_sorted([full, relative, f"{relative}.gitignore", f"community/{relative}", f"ghc:{relative}", f"github-community:{relative}"]), "community")
     if "/" in path:
         return None
     name = path[:-len(".gitignore")]
@@ -722,15 +790,16 @@ def filter_github_catalog_by_scope(catalog: list[CatalogEntry], scope: GitHubSco
     return [entry for entry in catalog if entry.github_scope == scope]
 
 
-def get_github_catalog_with_cache(no_cache: bool, no_color: bool) -> CatalogLoadResult:
+def get_github_catalog_with_cache(no_cache: bool) -> CatalogLoadResult:
     cache_path = cache_path_for("github-catalog")
-    cache = get_cache_status(cache_path)
+    ttl_ms = github_catalog_cache_ttl_ms()
+    cache = get_cache_status(cache_path, ttl_ms)
     if not no_cache:
-        cached = read_cache_json(cache_path)
+        cached = read_cache_json(cache_path, ttl_ms)
         if cached is not None:
             catalog = [catalog_entry_from_cache(entry) for entry in cached]
             return CatalogLoadResult(catalog, cache)
-    tree = fetch_json(GITHUB_TREE_URL, "Fetching GitHub template catalog", no_color=no_color)
+    tree = fetch_json(GITHUB_TREE_URL, "Fetching GitHub template catalog")
     catalog: list[CatalogEntry] = []
     for item in tree["tree"]:
         if item.get("type") != "blob":
@@ -741,18 +810,19 @@ def get_github_catalog_with_cache(no_cache: bool, no_color: bool) -> CatalogLoad
     catalog.sort(key=lambda item: item.display_name.lower())
     if not no_cache:
         write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
-    return CatalogLoadResult(catalog, get_cache_status(cache_path))
+    return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
 
-def get_gitignoreio_catalog_with_cache(no_cache: bool, no_color: bool) -> CatalogLoadResult:
+def get_gitignoreio_catalog_with_cache(no_cache: bool) -> CatalogLoadResult:
     cache_path = cache_path_for("gitignoreio-catalog")
-    cache = get_cache_status(cache_path)
+    ttl_ms = gitignoreio_catalog_cache_ttl_ms()
+    cache = get_cache_status(cache_path, ttl_ms)
     if not no_cache:
-        cached = read_cache_json(cache_path)
+        cached = read_cache_json(cache_path, ttl_ms)
         if cached is not None:
             catalog = [catalog_entry_from_cache(entry) for entry in cached]
             return CatalogLoadResult(catalog, cache)
-    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Fetching gitignore.io template catalog", no_color=no_color)
+    text = fetch_text(f"{GITIGNORE_IO_BASE}/list", "Fetching gitignore.io template catalog")
     keys = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
     catalog = [
         CatalogEntry("gitignoreio", key, key, key, unique_sorted([key, f"tt:{key}", f"gitignoreio:{key}"]))
@@ -760,18 +830,18 @@ def get_gitignoreio_catalog_with_cache(no_cache: bool, no_color: bool) -> Catalo
     ]
     if not no_cache:
         write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
-    return CatalogLoadResult(catalog, get_cache_status(cache_path))
+    return CatalogLoadResult(catalog, get_cache_status(cache_path, ttl_ms))
 
 
-def get_catalog(source: SourceName, no_cache: bool, no_color: bool) -> list[CatalogEntry]:
+def get_catalog(source: SourceName, no_cache: bool) -> list[CatalogEntry]:
     if source in ("github", "github-global", "github-community"):
-        catalog = get_github_catalog_with_cache(no_cache, no_color).catalog
+        catalog = get_github_catalog_with_cache(no_cache).catalog
         scope = source_to_github_scope(source)
         return catalog if scope is None else filter_github_catalog_by_scope(catalog, scope)
     if source == "gitignoreio":
-        return get_gitignoreio_catalog_with_cache(no_cache, no_color).catalog
-    github = get_github_catalog_with_cache(no_cache, no_color).catalog
-    gitignoreio = get_gitignoreio_catalog_with_cache(no_cache, no_color).catalog
+        return get_gitignoreio_catalog_with_cache(no_cache).catalog
+    github = get_github_catalog_with_cache(no_cache).catalog
+    gitignoreio = get_gitignoreio_catalog_with_cache(no_cache).catalog
     return sorted(github + gitignoreio, key=lambda entry: (entry.display_name.lower(), entry.source))
 
 
@@ -834,24 +904,50 @@ def resolve_entry(name: str, catalog: list[CatalogEntry]) -> CatalogEntry | None
 
 
 def levenshtein(a: str, b: str) -> int:
-    rows = len(a) + 1
-    cols = len(b) + 1
-    dp = [[0] * cols for _ in range(rows)]
-    for i in range(rows):
-        dp[i][0] = i
-    for j in range(cols):
-        dp[0][j] = j
-    for i in range(1, rows):
-        for j in range(1, cols):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
-    return dp[-1][-1]
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+
+    if len(a) > len(b):
+        a, b = b, a
+
+    previous = list(range(len(a) + 1))
+    for i, char_b in enumerate(b, start=1):
+        current = [i]
+        for j, char_a in enumerate(a, start=1):
+            cost = 0 if char_a == char_b else 1
+            current.append(min(
+                current[j - 1] + 1,
+                previous[j] + 1,
+                previous[j - 1] + cost,
+            ))
+        previous = current
+    return previous[-1]
+
+
+def shortlist_suggestion_candidates(query: str, values: list[str], limit: int = 64) -> list[str]:
+    q = normalize_loose(query)
+    ranked: list[tuple[tuple[int, int, int, str], str]] = []
+    for value in values:
+        normalized = normalize_loose(value)
+        contains = 0 if q and (q in normalized or normalized in q) else 1
+        prefix = 0 if q and normalized.startswith(q[: min(len(q), 3)]) else 1
+        length_gap = abs(len(normalized) - len(q))
+        ranked.append(((contains, prefix, length_gap, normalized), value))
+    ranked.sort(key=lambda item: item[0])
+    return [value for _, value in ranked[:limit]]
 
 
 def format_suggestions(query: str, catalog: list[CatalogEntry]) -> str:
     q = normalize_loose(query)
+    shortlisted = set(shortlist_suggestion_candidates(query, [entry.display_name for entry in catalog]))
     ranked: list[tuple[int, CatalogEntry]] = []
     for entry in catalog:
+        if shortlisted and entry.display_name not in shortlisted:
+            continue
         scores = []
         for candidate in [entry.display_name, *entry.aliases]:
             normalized_candidate = normalize_loose(candidate)
@@ -866,15 +962,7 @@ def format_suggestions(query: str, catalog: list[CatalogEntry]) -> str:
         return ""
     lines = []
     for entry in suggestions:
-        prefix = (
-            "tt"
-            if entry.source == "gitignoreio"
-            else "ghg"
-            if entry.github_scope == "global"
-            else "ghc"
-            if entry.github_scope == "community"
-            else "gh"
-        )
+        prefix = "tt" if entry.source == "gitignoreio" else "ghg" if entry.github_scope == "global" else "ghc" if entry.github_scope == "community" else "gh"
         suggested = entry.display_name
         if entry.github_scope == "global":
             suggested = suggested.removeprefix("Global/")
@@ -884,23 +972,15 @@ def format_suggestions(query: str, catalog: list[CatalogEntry]) -> str:
     return "Did you mean:\n" + "\n".join(lines)
 
 
-def get_github_template_content(path: str, no_color: bool) -> str:
-    return fetch_text(
-        f"{GITHUB_RAW_BASE}/{path}",
-        f"Fetching GitHub template {path.removesuffix('.gitignore')}",
-        no_color=no_color,
-    )
+def get_github_template_content(path: str) -> str:
+    return fetch_text(f"{GITHUB_RAW_BASE}/{path}", f"Fetching GitHub template {path.removesuffix('.gitignore')}")
 
 
-def get_gitignoreio_template_content(keys: list[str], no_color: bool) -> str:
+def get_gitignoreio_template_content(keys: list[str]) -> str:
     joined = ",".join(key.strip() for key in keys if key.strip())
     if not joined:
         raise ValueError("Please provide at least one gitignore.io template")
-    return fetch_text(
-        f"{GITIGNORE_IO_BASE}/{quote(joined)}",
-        f"Fetching gitignore.io template {joined}",
-        no_color=no_color,
-    )
+    return fetch_text(f"{GITIGNORE_IO_BASE}/{quote(joined)}", f"Fetching gitignore.io template {joined}")
 
 
 def is_comment_line(trimmed: str) -> bool:
@@ -967,13 +1047,7 @@ def parse_template_args(parts: list[str]) -> list[str]:
     return expanded
 
 
-def build_init_content(
-    raw_names: list[str],
-    source: SourceName,
-    no_cache: bool,
-    no_comments: bool,
-    no_color: bool,
-) -> str:
+def build_init_content(raw_names: list[str], source: SourceName, no_cache: bool, no_comments: bool) -> str:
     requested_names = parse_template_args(raw_names)
     if not requested_names:
         raise ValueError("Please provide at least one template name")
@@ -996,7 +1070,7 @@ def build_init_content(
     if has_github and has_gitignoreio:
         raise ValueError("init cannot mix GitHub templates and gitignore.io templates in one command")
     effective_source = effective_sources[0]
-    catalog = get_catalog(effective_source, no_cache, no_color)
+    catalog = get_catalog(effective_source, no_cache)
     resolved: list[CatalogEntry] = []
     for requested_name in requested_names:
         entry = resolve_entry(requested_name, catalog)
@@ -1010,14 +1084,14 @@ def build_init_content(
     if resolved and resolved[0].source == "github":
         parts: list[str] = []
         for entry in resolved:
-            section = get_github_template_content(entry.key, no_color)
+            section = get_github_template_content(entry.key)
             cleaned = apply_no_comments(section, no_comments).rstrip("\n")
             if not cleaned:
                 continue
             parts.append(cleaned if no_comments else f"# --- {entry.display_name} ---\n{cleaned}")
         return "\n\n".join(parts) + ("\n" if parts else "")
     keys = [entry.key for entry in resolved]
-    generated = get_gitignoreio_template_content(keys, no_color)
+    generated = get_gitignoreio_template_content(keys)
     return apply_no_comments(dedupe_lines(generated), no_comments)
 
 
@@ -1058,7 +1132,12 @@ def get_detected_extras(provider: Provider, includes: list[DetectInclude]) -> li
         if provider == "github":
             values.add("Global/JetBrains" if has_idea else "Global/VisualStudio" if has_vs else "Global/VisualStudioCode")
         else:
-            values.add("jetbrains" if has_idea else "visualstudio" if has_vs else "vscode" if has_vscode or True else "vscode")
+            if has_idea:
+                values.add("jetbrains")
+            elif has_vs:
+                values.add("visualstudio")
+            elif has_vscode:
+                values.add("vscode")
     return list(values)
 
 
@@ -1078,9 +1157,10 @@ def detect_templates(source: SourceName, includes: list[DetectInclude]) -> list[
         ("Pipfile", ["Python"], ["python"]),
         (".venv", ["Python"], ["python"]),
     ]
+    probe_exists = {probe: path_exists(probe) for probe, _, _ in rules}
     found: set[str] = set()
     for probe, github_values, gitignoreio_values in rules:
-        if path_exists(probe):
+        if probe_exists[probe]:
             for value in (github_values if provider == "github" else gitignoreio_values):
                 found.add(value)
     for extra in get_detected_extras(provider, includes):
@@ -1128,29 +1208,20 @@ def build_license_catalog_entry(path: str, content: str) -> LicenseCatalogEntry:
     return LicenseCatalogEntry(slug, path, title, spdx_id, hidden, create_license_aliases(slug, title, spdx_id))
 
 
-def get_license_catalog(no_cache: bool, no_color: bool) -> list[LicenseCatalogEntry]:
+def get_license_catalog(no_cache: bool) -> list[LicenseCatalogEntry]:
     cache_path = cache_path_for("license-catalog")
+    ttl_ms = license_catalog_cache_ttl_ms()
     if not no_cache:
-        cached = read_cache_json(cache_path)
+        cached = read_cache_json(cache_path, ttl_ms)
         if cached is not None:
             return [license_catalog_entry_from_cache(entry) for entry in cached if not entry.get("hidden", False)]
-    tree = fetch_json(LICENSE_TREE_URL, "Fetching license catalog", no_color=no_color)
+    tree = fetch_json(LICENSE_TREE_URL, "Fetching license catalog")
     paths = sorted(
         item["path"]
         for item in tree["tree"]
         if item.get("type") == "blob" and item["path"].startswith("_licenses/") and item["path"].endswith(".txt")
     )
-    catalog = [
-        build_license_catalog_entry(
-            path,
-            fetch_text(
-                f"{LICENSE_RAW_BASE}/{path}",
-                f"Fetching license metadata {path.removeprefix('_licenses/').removesuffix('.txt')}",
-                no_color=no_color,
-            ),
-        )
-        for path in paths
-    ]
+    catalog = [build_license_catalog_entry(path, fetch_text(f"{LICENSE_RAW_BASE}/{path}", f"Fetching license metadata {path.removeprefix('_licenses/').removesuffix('.txt')}")) for path in paths]
     if not no_cache:
         write_cache_json(cache_path, [entry.__dict__ for entry in catalog])
     return [entry for entry in catalog if not entry.hidden]
@@ -1176,22 +1247,15 @@ def format_license_suggestions(query: str, catalog: list[LicenseCatalogEntry]) -
     q = normalize_loose(query)
     ranked: list[tuple[int, LicenseCatalogEntry]] = []
     for entry in catalog:
-        score = min(
-            0 if normalize_loose(alias) in q or q in normalize_loose(alias) else levenshtein(q, normalize_loose(alias))
-            for alias in entry.aliases
-        )
+        score = min(0 if normalize_loose(alias) in q or q in normalize_loose(alias) else levenshtein(q, normalize_loose(alias)) for alias in entry.aliases)
         ranked.append((score, entry))
     ranked.sort(key=lambda item: (item[0], item[1].key))
     suggestions = [entry.key for _, entry in ranked[:5]]
     return "" if not suggestions else "Did you mean:\n" + "\n".join(f"  - {item}" for item in suggestions)
 
 
-def get_license_template(entry: LicenseCatalogEntry, no_color: bool) -> LicenseTemplate:
-    content = fetch_text(
-        f"{LICENSE_RAW_BASE}/{entry.path}",
-        f"Fetching license template {entry.key}",
-        no_color=no_color,
-    )
+def get_license_template(entry: LicenseCatalogEntry) -> LicenseTemplate:
+    content = fetch_text(f"{LICENSE_RAW_BASE}/{entry.path}", f"Fetching license template {entry.key}")
     _, body = parse_front_matter(content)
     return LicenseTemplate(build_license_catalog_entry(entry.path, content), body if body.endswith("\n") else body + "\n")
 
@@ -1227,17 +1291,17 @@ def resolve_license_invocation(rest: list[str]) -> tuple[str, list[str]]:
     raise ValueError(f'Unknown license subcommand or target: {rest[0]}. Use "license list", "license search", "license view", or "license init".')
 
 
-def cmd_list(source: SourceName, no_cache: bool, no_color: bool) -> None:
-    for entry in get_catalog(source, no_cache, no_color):
+def cmd_list(source: SourceName, no_cache: bool) -> None:
+    for entry in get_catalog(source, no_cache):
         print(f"{entry.display_name}\t[{entry.source}]" if source == "all" else display_name_for_source(entry, source))
 
 
-def cmd_search(query: str, source: SourceName, no_cache: bool, no_color: bool) -> None:
+def cmd_search(query: str, source: SourceName, no_cache: bool) -> None:
     q = query.strip()
     if not q:
         raise ValueError("Please provide a search query")
     q_loose = normalize_loose(q)
-    catalog = get_catalog(source, no_cache, no_color)
+    catalog = get_catalog(source, no_cache)
     matches = [entry for entry in catalog if q_loose in normalize_loose(entry.display_name) or any(q_loose in normalize_loose(alias) for alias in entry.aliases)]
     if not matches:
         print(f'No templates found for "{query}"', file=sys.stderr)
@@ -1249,7 +1313,7 @@ def cmd_search(query: str, source: SourceName, no_cache: bool, no_color: bool) -
         print(f"{entry.display_name}\t[{entry.source}]" if source == "all" else display_name_for_source(entry, source))
 
 
-def cmd_view(name: str, source: SourceName, no_cache: bool, no_comments: bool, no_color: bool) -> None:
+def cmd_view(name: str, source: SourceName, no_cache: bool, no_comments: bool) -> None:
     provider, scope, _ = parse_provider_prefix(name)
     effective_source: SourceName = (
         "gitignoreio"
@@ -1262,7 +1326,7 @@ def cmd_view(name: str, source: SourceName, no_cache: bool, no_comments: bool, n
         if provider == "github"
         else assert_single_source(source, "view")
     )
-    catalog = get_catalog(effective_source, no_cache, no_color)
+    catalog = get_catalog(effective_source, no_cache)
     entry = resolve_entry(name, catalog)
     if entry is None:
         print(f"Template not found: {name}", file=sys.stderr)
@@ -1270,23 +1334,12 @@ def cmd_view(name: str, source: SourceName, no_cache: bool, no_comments: bool, n
         if suggestions:
             print(suggestions, file=sys.stderr)
         raise SystemExit(1)
-    content = get_github_template_content(entry.key, no_color) if entry.source == "github" else get_gitignoreio_template_content([entry.key], no_color)
+    content = get_github_template_content(entry.key) if entry.source == "github" else get_gitignoreio_template_content([entry.key])
     sys.stdout.write(apply_no_comments(content, no_comments).rstrip("\n") + "\n")
 
 
-def cmd_init(
-    raw_names: list[str],
-    source: SourceName,
-    output: str,
-    output_explicit: bool,
-    force: bool,
-    append: bool,
-    no_cache: bool,
-    no_comments: bool,
-    no_color: bool,
-    force_stdout: bool = False,
-) -> None:
-    content = build_init_content(raw_names, source, no_cache, no_comments, no_color)
+def cmd_init(raw_names: list[str], source: SourceName, output: str, output_explicit: bool, force: bool, append: bool, no_cache: bool, no_comments: bool, force_stdout: bool = False) -> None:
+    content = build_init_content(raw_names, source, no_cache, no_comments)
     if force_stdout or should_write_to_stdout(output_explicit):
         sys.stdout.write(content)
         return
@@ -1299,17 +1352,7 @@ def should_force_stdout_for_implicit_init(output_explicit: bool, append: bool) -
     return not output_explicit and not append
 
 
-def cmd_detect(
-    source: SourceName,
-    output: str,
-    output_explicit: bool,
-    force: bool,
-    append: bool,
-    no_cache: bool,
-    includes: list[DetectInclude],
-    no_comments: bool,
-    no_color: bool,
-) -> None:
+def cmd_detect(source: SourceName, output: str, output_explicit: bool, force: bool, append: bool, no_cache: bool, includes: list[DetectInclude], no_comments: bool) -> None:
     effective_source = assert_single_source(source, "detect")
     if effective_source == "github-community":
         raise ValueError("detect does not support ghc/github-community")
@@ -1319,11 +1362,11 @@ def cmd_detect(
         raise SystemExit(1)
     if sys.stdout.isatty() or output_explicit:
         print("Detected templates: " + ", ".join(detected))
-    cmd_init(detected, effective_source, output, output_explicit, force, append, no_cache, no_comments, no_color)
+    cmd_init(detected, effective_source, output, output_explicit, force, append, no_cache, no_comments)
 
 
-def cmd_license_list(no_cache: bool, no_color: bool) -> None:
-    catalog = get_license_catalog(no_cache, no_color)
+def cmd_license_list(no_cache: bool) -> None:
+    catalog = get_license_catalog(no_cache)
     slug_width = max(len("Slug"), *(len(entry.key) for entry in catalog))
     spdx_width = max(len("SPDX"), *(len(entry.spdx_id or "-") for entry in catalog))
     print(f"{pad_right('Slug', slug_width)}  {pad_right('SPDX', spdx_width)}  Title")
@@ -1332,12 +1375,12 @@ def cmd_license_list(no_cache: bool, no_color: bool) -> None:
         print(f"{pad_right(entry.key, slug_width)}  {pad_right(entry.spdx_id or '-', spdx_width)}  {entry.title}")
 
 
-def cmd_license_search(query: str, no_cache: bool, no_color: bool) -> None:
+def cmd_license_search(query: str, no_cache: bool) -> None:
     q = query.strip()
     if not q:
         raise ValueError("Please provide a search query")
     q_loose = normalize_loose(q)
-    catalog = get_license_catalog(no_cache, no_color)
+    catalog = get_license_catalog(no_cache)
     matches = [entry for entry in catalog if any(q_loose in normalize_loose(alias) for alias in entry.aliases)]
     if not matches:
         print(f'No licenses found for "{query}"', file=sys.stderr)
@@ -1350,8 +1393,8 @@ def cmd_license_search(query: str, no_cache: bool, no_color: bool) -> None:
         print(f"{label}\t{entry.title}")
 
 
-def cmd_license_view(name: str, no_cache: bool, no_color: bool) -> None:
-    catalog = get_license_catalog(no_cache, no_color)
+def cmd_license_view(name: str, no_cache: bool) -> None:
+    catalog = get_license_catalog(no_cache)
     entry = resolve_license_entry(name, catalog)
     if entry is None:
         print(f"License not found: {name}", file=sys.stderr)
@@ -1359,20 +1402,11 @@ def cmd_license_view(name: str, no_cache: bool, no_color: bool) -> None:
         if suggestions:
             print(suggestions, file=sys.stderr)
         raise SystemExit(1)
-    sys.stdout.write(get_license_template(entry, no_color).body)
+    sys.stdout.write(get_license_template(entry).body)
 
 
-def cmd_license_init(
-    name: str,
-    output: str,
-    output_explicit: bool,
-    force: bool,
-    append: bool,
-    no_cache: bool,
-    no_color: bool,
-    values: dict[str, str | None],
-) -> None:
-    catalog = get_license_catalog(no_cache, no_color)
+def cmd_license_init(name: str, output: str, output_explicit: bool, force: bool, append: bool, no_cache: bool, values: dict[str, str | None]) -> None:
+    catalog = get_license_catalog(no_cache)
     entry = resolve_license_entry(name, catalog)
     if entry is None:
         print(f"License not found: {name}", file=sys.stderr)
@@ -1380,7 +1414,7 @@ def cmd_license_init(
         if suggestions:
             print(suggestions, file=sys.stderr)
         raise SystemExit(1)
-    rendered = apply_license_placeholders(get_license_template(entry, no_color).body, values)
+    rendered = apply_license_placeholders(get_license_template(entry).body, values)
     if should_write_to_stdout(output_explicit):
         sys.stdout.write(rendered)
         return
@@ -1450,18 +1484,33 @@ def can_read_write_dir(path: Path) -> bool:
         return False
 
 
-def safe_load_catalog(source: SourceName, no_cache: bool, no_color: bool) -> tuple[bool, str, int]:
+def load_provider_snapshots(no_cache: bool, no_color: bool) -> dict[SourceName, CatalogLoadResult]:
+    github = get_github_catalog_with_cache(no_cache, no_color)
+    gitignoreio = get_gitignoreio_catalog_with_cache(no_cache, no_color)
+    return {
+        "github": github,
+        "github-global": CatalogLoadResult(filter_github_catalog_by_scope(github.catalog, "global"), github.cache),
+        "github-community": CatalogLoadResult(filter_github_catalog_by_scope(github.catalog, "community"), github.cache),
+        "gitignoreio": gitignoreio,
+    }
+
+
+def safe_catalog_detail(result: CatalogLoadResult, no_cache: bool) -> tuple[bool, str, int]:
+    return True, f"{len(result.catalog)} templates available; cache {format_cache_status(result.cache, no_cache)}", len(result.catalog)
+
+
+def safe_load_catalog(source: SourceName, no_cache: bool) -> tuple[bool, str, int]:
     try:
         if source in ("github", "github-global", "github-community"):
-            result = get_github_catalog_with_cache(no_cache, no_color)
+            result = get_github_catalog_with_cache(no_cache)
             scope = source_to_github_scope(source)
             filtered = result.catalog if scope is None else filter_github_catalog_by_scope(result.catalog, scope)
             return True, f"{len(filtered)} templates available; cache {format_cache_status(result.cache, no_cache)}", len(filtered)
         if source == "gitignoreio":
-            result = get_gitignoreio_catalog_with_cache(no_cache, no_color)
+            result = get_gitignoreio_catalog_with_cache(no_cache)
             return True, f"{len(result.catalog)} templates available; cache {format_cache_status(result.cache, no_cache)}", len(result.catalog)
-        github = get_github_catalog_with_cache(no_cache, no_color)
-        gitignoreio = get_gitignoreio_catalog_with_cache(no_cache, no_color)
+        github = get_github_catalog_with_cache(no_cache)
+        gitignoreio = get_gitignoreio_catalog_with_cache(no_cache)
         count = len(github.catalog) + len(gitignoreio.catalog)
         return True, f"{count} templates available; github cache {format_cache_status(github.cache, no_cache)}; gitignore.io cache {format_cache_status(gitignoreio.cache, no_cache)}", count
     except Exception as exc:
@@ -1477,20 +1526,17 @@ def get_platform_summary() -> str:
     return f"{system} (Unix-like)"
 
 
-def cmd_doctor(no_cache: bool, no_color: bool) -> None:
+def cmd_doctor(no_cache: bool) -> None:
     env_checks: list[DoctorCheck] = [
         DoctorCheck("cache directory", can_read_write_dir(CACHE_DIR), f"{CACHE_DIR}"),
         DoctorCheck("platform", True, get_platform_summary()),
     ]
-    provider_checks = [
-        DoctorCheck(name, ok, detail)
-        for name, (ok, detail, _) in {
-            "github all": safe_load_catalog("github", no_cache, no_color),
-            "github global": safe_load_catalog("github-global", no_cache, no_color),
-            "github community": safe_load_catalog("github-community", no_cache, no_color),
-            "gitignore.io": safe_load_catalog("gitignoreio", no_cache, no_color),
-        }.items()
-    ]
+    provider_checks = [DoctorCheck(name, ok, detail) for name, (ok, detail, _) in {
+        "github all": safe_load_catalog("github", no_cache),
+        "github global": safe_load_catalog("github-global", no_cache),
+        "github community": safe_load_catalog("github-community", no_cache),
+        "gitignore.io": safe_load_catalog("gitignoreio", no_cache),
+    }.items()]
     detect_checks: list[DoctorCheck] = []
     for source, label in [("github", "detect gh"), ("github-global", "detect ghg"), ("gitignoreio", "detect tt")]:
         try:
@@ -1524,10 +1570,10 @@ def print_stats_table(rows: list[StatsRow]) -> None:
         print(f"{pad_right(row.label, label_width)}  {pad_right(str(row.count), count_width)}")
 
 
-def cmd_stats(source: SourceName, no_cache: bool, no_color: bool) -> None:
+def cmd_stats(source: SourceName, no_cache: bool) -> None:
     if source == "all":
-        github = get_github_catalog_with_cache(no_cache, no_color)
-        gitignoreio = get_gitignoreio_catalog_with_cache(no_cache, no_color)
+        github = get_github_catalog_with_cache(no_cache)
+        gitignoreio = get_gitignoreio_catalog_with_cache(no_cache)
         rows = [
             StatsRow("github total", len(github.catalog)),
             StatsRow("github root", len([entry for entry in github.catalog if entry.github_scope == "root"])),
@@ -1541,11 +1587,11 @@ def cmd_stats(source: SourceName, no_cache: bool, no_color: bool) -> None:
         print(f"gitignore.io cache: {format_cache_status(gitignoreio.cache, no_cache)}")
         return
     if source == "gitignoreio":
-        result = get_gitignoreio_catalog_with_cache(no_cache, no_color)
+        result = get_gitignoreio_catalog_with_cache(no_cache)
         print_stats_table([StatsRow("gitignore.io", len(result.catalog))])
         print(f"\nCache: {format_cache_status(result.cache, no_cache)}")
         return
-    result = get_github_catalog_with_cache(no_cache, no_color)
+    result = get_github_catalog_with_cache(no_cache)
     scope = source_to_github_scope(source)
     filtered = result.catalog if scope is None else filter_github_catalog_by_scope(result.catalog, scope)
     label = "github global" if source == "github-global" else "github community" if source == "github-community" else "github"
@@ -1577,8 +1623,6 @@ def get_self_tests() -> list[SelfTestCase]:
         SelfTestCase("implicit init only forces stdout without append or explicit output", lambda: _test_implicit_init_stdout_behavior()),
         SelfTestCase("parseArgs recognizes license fullname, project, and year", lambda: _test_parse_license_fields()),
         SelfTestCase("parseArgs keeps --author and --owner as fullname aliases", lambda: _test_parse_fullname_aliases()),
-        SelfTestCase("parseArgs recognizes --no-color", lambda: _test_no_color_flag()),
-        SelfTestCase("parseArgs recognizes --no-colour", lambda: _test_no_colour_flag()),
         SelfTestCase("resolveLicenseInvocation defaults to list", lambda: _test_license_invocation_default()),
         SelfTestCase("mergeAppendedContent dedupes repeated lines", lambda: assert_equal_string(merge_appended_content("a\nb\n", "b\nc\n"), "a\nb\nc\n", "append dedupe")),
         SelfTestCase("parseTemplateArgs trims empty comma segments", lambda: assert_equal_strings(parse_template_args(["gh:", "node,,python", "", "go,"]), ["gh:node", "gh:python", "gh:go"], "empty comma segments")),
@@ -1653,16 +1697,6 @@ def _test_parse_fullname_aliases() -> None:
     assert_equal_string(owner_parsed.fullname or "", "Jane Doe", "license owner alias")
 
 
-def _test_no_color_flag() -> None:
-    parsed = parse_args(["list", "--no-color"])
-    assert_equal_string(str(parsed.no_color), "True", "no-color flag")
-
-
-def _test_no_colour_flag() -> None:
-    parsed = parse_args(["list", "--no-colour"])
-    assert_equal_string(str(parsed.no_color), "True", "no-colour flag")
-
-
 def _test_license_invocation_default() -> None:
     action, args = resolve_license_invocation([])
     assert_equal_string(action, "list", "license default action")
@@ -1708,39 +1742,19 @@ def main() -> None:
         parsed = parse_args(sys.argv[1:])
         command = parsed.command
         if command == "list":
-            cmd_list(parsed.source, parsed.no_cache, parsed.no_color)
+            cmd_list(parsed.source, parsed.no_cache)
             return
         if command == "search":
-            cmd_search(" ".join(parsed.rest), parsed.source, parsed.no_cache, parsed.no_color)
+            cmd_search(" ".join(parsed.rest), parsed.source, parsed.no_cache)
             return
         if command == "view":
-            cmd_view(" ".join(parsed.rest), parsed.source, parsed.no_cache, parsed.no_comments, parsed.no_color)
+            cmd_view(" ".join(parsed.rest), parsed.source, parsed.no_cache, parsed.no_comments)
             return
         if command in ("init", "i"):
-            cmd_init(
-                parsed.rest,
-                parsed.source,
-                parsed.output,
-                parsed.output_explicit,
-                parsed.force,
-                parsed.append,
-                parsed.no_cache,
-                parsed.no_comments,
-                parsed.no_color,
-            )
+            cmd_init(parsed.rest, parsed.source, parsed.output, parsed.output_explicit, parsed.force, parsed.append, parsed.no_cache, parsed.no_comments)
             return
         if command == "detect":
-            cmd_detect(
-                parsed.source,
-                parsed.output,
-                parsed.output_explicit,
-                parsed.force,
-                parsed.append,
-                parsed.no_cache,
-                parsed.detect_includes,
-                parsed.no_comments,
-                parsed.no_color,
-            )
+            cmd_detect(parsed.source, parsed.output, parsed.output_explicit, parsed.force, parsed.append, parsed.no_cache, parsed.detect_includes, parsed.no_comments)
             return
         if command == "compact":
             cmd_compact(parsed.rest[0] if parsed.rest else None, parsed.output, parsed.force)
@@ -1748,35 +1762,26 @@ def main() -> None:
         if command == "license":
             action, license_args = resolve_license_invocation(parsed.rest)
             if action == "list":
-                cmd_license_list(parsed.no_cache, parsed.no_color)
+                cmd_license_list(parsed.no_cache)
                 return
             if action == "search":
-                cmd_license_search(" ".join(license_args), parsed.no_cache, parsed.no_color)
+                cmd_license_search(" ".join(license_args), parsed.no_cache)
                 return
             if action == "view":
-                cmd_license_view(" ".join(license_args), parsed.no_cache, parsed.no_color)
+                cmd_license_view(" ".join(license_args), parsed.no_cache)
                 return
-            cmd_license_init(
-                " ".join(license_args),
-                parsed.output if parsed.output_explicit else "LICENSE",
-                parsed.output_explicit,
-                parsed.force,
-                parsed.append,
-                parsed.no_cache,
-                parsed.no_color,
-                {
-                    "year": parsed.year,
-                    "fullname": parsed.fullname,
-                    "project": parsed.project,
-                    "project_url": parsed.project_url,
-                },
-            )
+            cmd_license_init(" ".join(license_args), parsed.output if parsed.output_explicit else "LICENSE", parsed.output_explicit, parsed.force, parsed.append, parsed.no_cache, {
+                "year": parsed.year,
+                "fullname": parsed.fullname,
+                "project": parsed.project,
+                "project_url": parsed.project_url,
+            })
             return
         if command == "doctor":
-            cmd_doctor(parsed.no_cache, parsed.no_color)
+            cmd_doctor(parsed.no_cache)
             return
         if command == "stats":
-            cmd_stats(parsed.source, parsed.no_cache, parsed.no_color)
+            cmd_stats(parsed.source, parsed.no_cache)
             return
         if command in ("check", "selftest"):
             cmd_selftest()
@@ -1786,6 +1791,9 @@ def main() -> None:
             return
         if command == "install-completion":
             cmd_install_completion(parsed.rest[0] if parsed.rest else "")
+            return
+        if command in ("update-catalog", "refresh-catalog"):
+            cmd_update_catalog(parsed.rest[0] if parsed.rest else None)
             return
         if command in ("help", "--help", "-h", None):
             print_help()
@@ -1801,7 +1809,6 @@ def main() -> None:
                 parsed.append,
                 parsed.no_cache,
                 parsed.no_comments,
-                parsed.no_color,
                 should_force_stdout_for_implicit_init(parsed.output_explicit, parsed.append),
             )
             return
