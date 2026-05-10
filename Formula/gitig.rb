@@ -3,8 +3,8 @@ class Gitig < Formula
 
   desc "Ignorant CLI for generating .gitignore and LICENSE files"
   homepage "https://github.com/verylongdelay/gitig"
-  url "https://github.com/VeryLongDelay/gitig/archive/refs/tags/v0.0.1.tar.gz"
-  sha256 "e066d693c92505419f3cdc824d5d80fc72b0a24194dd9eb08ac87c4232428256"
+  url "https://github.com/VeryLongDelay/gitig/archive/refs/tags/v0.0.2.tar.gz"
+  sha256 "1e659c5a0bb432d4d557379dd81c5c930daf31b70f9f2909977a0eb03ee461b5"
   license "MIT"
 
   depends_on "python@3.13"
