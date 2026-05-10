@@ -24,6 +24,8 @@ clean:
 build: clean
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) build
 
+release-artifact: release-artifacts
+
 release-artifacts: build
 	@echo "Built release artifacts:"
 	@ls -1 $(SDIST) $(WHEEL)

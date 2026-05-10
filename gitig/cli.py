@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import sys
 import tomllib
 from importlib import metadata
@@ -30,6 +31,65 @@ from .core import (
     should_force_stdout_for_implicit_init,
 )
 
+VALID_COMMANDS = [
+    "list",
+    "search",
+    "view",
+    "init",
+    "detect",
+    "compact",
+    "license",
+    "li",
+    "doctor",
+    "stats",
+    "explain",
+    "diff",
+    "check",
+    "selftest",
+    "completion",
+    "install-completion",
+    "update",
+    "update-catalog",
+    "refresh-catalog",
+    "version",
+    "help",
+]
+
+VALID_FLAGS = [
+    "-a",
+    "--append",
+    "-c",
+    "-f",
+    "--force",
+    "-h",
+    "--help",
+    "-li",
+    "-n",
+    "-nc",
+    "--no-cache",
+    "--no-color",
+    "--no-colour",
+    "--no-comment",
+    "--no-comments",
+    "-o",
+    "--output",
+    "-s",
+    "--source",
+    "--include",
+    "--quiet",
+    "--json",
+    "-v",
+    "--version",
+    "--verison",
+    "--year",
+    "--fullname",
+    "--author",
+    "--owner",
+    "--project",
+    "--projecturl",
+    "--project-url",
+]
+
 
 def get_version() -> str:
     try:
@@ -48,9 +108,54 @@ def print_version() -> None:
     print(get_version())
 
 
+def _looks_like_template_token(value: str) -> bool:
+    if not value or value.startswith("-"):
+        return False
+    lowered = value.lower()
+    if ":" in value:
+        return True
+    if "," in value:
+        return True
+    return lowered.startswith("gh") or lowered.startswith("tt")
+
+
+def _find_close_matches(value: str, candidates: list[str], cutoff: float = 0.6) -> list[str]:
+    return difflib.get_close_matches(value, candidates, n=3, cutoff=cutoff)
+
+
+def _find_suggestion_target(argv: list[str]) -> tuple[str, list[str]] | None:
+    for token in argv:
+        if token.startswith("-"):
+            matches = _find_close_matches(token, VALID_FLAGS)
+            if matches:
+                return token, matches
+            continue
+        if token in VALID_COMMANDS:
+            break
+        if _looks_like_template_token(token):
+            break
+        matches = _find_close_matches(token, VALID_COMMANDS)
+        if matches:
+            return token, matches
+        break
+    return None
+
+
+def print_unrecognized_command(argv: list[str]) -> None:
+    print("Unrecognized command", file=sys.stderr)
+    suggestion = _find_suggestion_target(argv)
+    if not suggestion:
+        return
+    token, matches = suggestion
+    print(f"Did you mean one of these for `{token}`?", file=sys.stderr)
+    for match in matches:
+        print(f"  - {match}", file=sys.stderr)
+
+
 def main() -> None:
     try:
-        parsed = parse_args(sys.argv[1:])
+        argv = sys.argv[1:]
+        parsed = parse_args(argv)
         command = parsed.command
         if command == "list":
             cmd_list(parsed.source, parsed.no_cache)
@@ -128,12 +233,16 @@ def main() -> None:
         if command in ("help", "--help", "-h", None):
             print_help()
             return
+        if not _looks_like_template_token(command):
+            command_matches = _find_close_matches(command, VALID_COMMANDS)
+            if command_matches:
+                raise UnrecognizedCommandError("unrecognized command")
         force_stdout = should_force_stdout_for_implicit_init(parsed.output_explicit, parsed.append)
         cmd_init([command, *parsed.rest], parsed.source, parsed.output, parsed.output_explicit, parsed.force, parsed.append, parsed.no_cache, parsed.no_comments, force_stdout=force_stdout)
     except (BrokenPipeError, KeyboardInterrupt):
         raise SystemExit(1)
     except UnrecognizedCommandError:
-        print("Unrecognized command. Run `gitig help` for usage information.", file=sys.stderr)
+        print_unrecognized_command(sys.argv[1:])
         raise SystemExit(1)
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

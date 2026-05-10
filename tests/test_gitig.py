@@ -291,7 +291,7 @@ class DispatchTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 gitig.main()
         self.assertEqual(exc.exception.code, 1)
-        self.assertEqual(stderr.getvalue().strip(), "unrecognized command")
+        self.assertIn("unrecognized command", stderr.getvalue())
 
     def test_main_invalid_short_flag_prints_unrecognized_command(self) -> None:
         stderr = io.StringIO()
@@ -299,7 +299,25 @@ class DispatchTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 gitig.main()
         self.assertEqual(exc.exception.code, 1)
-        self.assertEqual(stderr.getvalue().strip(), "unrecognized command")
+        self.assertIn("unrecognized command", stderr.getvalue())
+
+    def test_main_invalid_long_flag_suggests_close_flag(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(gitig.sys, "argv", ["gitig.py", "--sorce", "gh"]), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                gitig.main()
+        self.assertEqual(exc.exception.code, 1)
+        self.assertIn("unrecognized command", stderr.getvalue())
+        self.assertIn("--source", stderr.getvalue())
+
+    def test_main_invalid_command_suggests_close_command(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(gitig.sys, "argv", ["gitig.py", "lst"]), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                gitig.main()
+        self.assertEqual(exc.exception.code, 1)
+        self.assertIn("unrecognized command", stderr.getvalue())
+        self.assertIn("list", stderr.getvalue())
 
 
 if __name__ == "__main__":
