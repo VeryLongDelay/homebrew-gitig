@@ -5,7 +5,7 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 
-from .args import parse_args
+from .args import UnrecognizedCommandError, parse_args
 from .assets_runtime import print_help
 from .core import (
     cmd_compact,
@@ -131,6 +131,9 @@ def main() -> None:
         force_stdout = should_force_stdout_for_implicit_init(parsed.output_explicit, parsed.append)
         cmd_init([command, *parsed.rest], parsed.source, parsed.output, parsed.output_explicit, parsed.force, parsed.append, parsed.no_cache, parsed.no_comments, force_stdout=force_stdout)
     except (BrokenPipeError, KeyboardInterrupt):
+        raise SystemExit(1)
+    except UnrecognizedCommandError:
+        print("Unrecognized command. Run `gitig help` for usage information.", file=sys.stderr)
         raise SystemExit(1)
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
