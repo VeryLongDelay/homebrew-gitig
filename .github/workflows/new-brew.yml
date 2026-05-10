@@ -1,0 +1,95 @@
+name: Bump Homebrew formula
+
+# On each version tag, update Formula/gitig.rb url + sha256 on the default branch
+# so `brew tap <owner>/<repo>` users get matching archive metadata.
+#
+# If pushes are blocked by branch protection rules, allow "GitHub Actions" to push
+# to the default branch, or use an organization bot token with workflow write.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to point the formula at (e.g. v1.2.3)
+        required: true
+        type: string
+
+concurrency:
+  group: bump-homebrew-formula-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            raw="${{ github.event.inputs.tag }}"
+          else
+            raw="${GITHUB_REF_NAME}"
+          fi
+          raw="${raw#refs/tags/}"
+          if [[ "$raw" != v* ]]; then
+            raw="v${raw}"
+          fi
+          echo "tag=$raw" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Compute archive tarball sha256
+        id: archive
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO_LOWER: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${REPO_LOWER}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Fetching: ${url}"
+          sha="$(curl --fail --silent --show-error --location "${url}" | sha256sum | awk '{ print $1 }')"
+          echo "sha256=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "url=${url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Patch Formula/gitig.rb
+        shell: bash
+        env:
+          URL: ${{ steps.archive.outputs.url }}
+          SHA256: ${{ steps.archive.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          sed \
+            -e "s|^  url \".*\"|  url \"${URL}\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${SHA256}\"|" \
+            Formula/gitig.rb >"${tmp}"
+          mv "${tmp}" Formula/gitig.rb
+
+      - name: Commit and push formula bump
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/gitig.rb
+          if git diff --staged --quiet; then
+            echo "Formula already matches ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "formula: bump to ${TAG}"
+          git pull --rebase "origin" "${DEFAULT_BRANCH}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"

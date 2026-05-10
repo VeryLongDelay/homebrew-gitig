@@ -1,0 +1,22 @@
+name: Verify Homebrew formula tarball
+
+# On PRs that touch the formula, fetch the tarball in `url` and confirm it matches `sha256`.
+
+on:
+  pull_request:
+    paths:
+      - "Formula/**/*.rb"
+
+permissions:
+  contents: read
+
+jobs:
+  checksum:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify archive sha256 matches formula
+        env:
+          ARCHIVE_PATH: ${{ runner.temp }}/gitig-archive.tgz
+        run: ruby scripts/verify-formula-archive.rb Formula/gitig.rb
