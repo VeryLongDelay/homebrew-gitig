@@ -1,4 +1,1 @@
-__all__ = ["__version__"]
-
-__version__ = "0.0.0"
-
+from .cli import *  # noqa: F401,F403
