@@ -6,9 +6,10 @@ import os
 import sys
 import threading
 import time
+import tomllib
 from dataclasses import asdict, dataclass
 from difflib import unified_diff
-from importlib import resources
+from importlib import metadata, resources
 from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.error import HTTPError, URLError
@@ -159,6 +160,7 @@ COMMANDS = [
     "completion",
     "install-completion",
     "help",
+    "version",
     "update",
     "update-catalog",
     "refresh-catalog",
@@ -201,6 +203,7 @@ Commands:
   install-completion <bash|zsh|fish>
   help
   update [all|github|ghg|ghc|tt|license]
+  -v, --version, --verison
 
 Examples:
   gitig gh:Node
@@ -215,6 +218,7 @@ Examples:
   gitig update license
   gitig update --quiet
   gitig update --json
+  gitig -v
 
 Flags:
   -o, --output <file>
@@ -299,6 +303,23 @@ def print_help() -> None:
     print(read_asset("help.txt").strip())
 
 
+def get_version() -> str:
+    try:
+        return metadata.version("gitig")
+    except metadata.PackageNotFoundError:
+        pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        if pyproject_path.exists():
+            project = tomllib.loads(pyproject_path.read_text("utf8")).get("project", {})
+            version = project.get("version")
+            if isinstance(version, str) and version.strip():
+                return version.strip()
+    return "0.0.0"
+
+
+def print_version() -> None:
+    print(get_version())
+
+
 def normalize_text(value: str) -> str:
     return value.strip().replace("\\", "/")
 
@@ -372,6 +393,11 @@ def parse_args(argv: list[str]) -> Args:
 
         if arg == "-c" and not filtered:
             filtered.append("compact")
+            i += 1
+            continue
+
+        if arg in ("-v", "--version", "--verison") and not filtered:
+            filtered.append("version")
             i += 1
             continue
 
@@ -2178,6 +2204,9 @@ def main() -> None:
         if command in ("update", "update-catalog", "refresh-catalog"):
             cmd_update_catalog(parsed.rest[0] if parsed.rest else None, quiet=parsed.quiet, json_output=parsed.json_output)
             return
+        if command == "version":
+            print_version()
+            return
         if command in ("help", "--help", "-h", None):
             print_help()
             return
@@ -2204,4 +2233,3 @@ def main() -> None:
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)
-
