@@ -1,11 +1,15 @@
 import contextlib
 import io
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import gitig
+import gitig.cli as gitig_cli
+import gitig.core as gitig_core
+import gitig.spinner as gitig_spinner
 
 
 class ParseArgsTests(unittest.TestCase):
@@ -60,24 +64,24 @@ class TemplateResolutionTests(unittest.TestCase):
 
     def test_build_init_content_for_github_sections(self) -> None:
         catalog = [gitig.CatalogEntry("github", "Node", "Node.gitignore", "Node", ["Node", "gh:Node"], "root")]
-        with mock.patch.object(gitig, "get_catalog", return_value=catalog), mock.patch.object(
-            gitig, "get_github_template_content", return_value="node_modules/\n"
+        with mock.patch.object(gitig_core, "get_catalog", return_value=catalog), mock.patch.object(
+            gitig_core, "get_github_template_content", return_value="node_modules/\n"
         ):
             content = gitig.build_init_content(["gh:Node"], "github", True, False)
         self.assertEqual(content, "# --- Node ---\nnode_modules/\n")
 
     def test_build_init_content_for_github_no_comments(self) -> None:
         catalog = [gitig.CatalogEntry("github", "Node", "Node.gitignore", "Node", ["Node", "gh:Node"], "root")]
-        with mock.patch.object(gitig, "get_catalog", return_value=catalog), mock.patch.object(
-            gitig, "get_github_template_content", return_value="# heading\nnode_modules/\n"
+        with mock.patch.object(gitig_core, "get_catalog", return_value=catalog), mock.patch.object(
+            gitig_core, "get_github_template_content", return_value="# heading\nnode_modules/\n"
         ):
             content = gitig.build_init_content(["gh:Node"], "github", True, True)
         self.assertEqual(content, "node_modules/\n")
 
     def test_build_init_content_for_gitignoreio_dedupes(self) -> None:
         catalog = [gitig.CatalogEntry("gitignoreio", "python", "python", "python", ["python", "tt:python"])]
-        with mock.patch.object(gitig, "get_catalog", return_value=catalog), mock.patch.object(
-            gitig, "get_gitignoreio_template_content", return_value="venv/\nvenv/\n__pycache__/\n"
+        with mock.patch.object(gitig_core, "get_catalog", return_value=catalog), mock.patch.object(
+            gitig_core, "get_gitignoreio_template_content", return_value="venv/\nvenv/\n__pycache__/\n"
         ):
             content = gitig.build_init_content(["tt:python"], "gitignoreio", True, False)
         self.assertEqual(content, "venv/\n__pycache__/\n")
@@ -127,6 +131,9 @@ class OutputTests(unittest.TestCase):
                 return True
 
         class FakeResponse:
+            headers: dict[str, str] = {}
+            status = 200
+
             def __enter__(self) -> "FakeResponse":
                 return self
 
@@ -137,11 +144,15 @@ class OutputTests(unittest.TestCase):
                 return b"payload"
 
         stream = FakeStream()
-        with mock.patch.object(gitig.sys, "stderr", stream), mock.patch.object(gitig, "urlopen", return_value=FakeResponse()):
+        with (
+            mock.patch.object(gitig_spinner.sys, "stderr", stream),
+            mock.patch.object(gitig_core, "urlopen", return_value=FakeResponse()),
+            mock.patch.object(gitig_spinner.Spinner, "START_DELAY_SECONDS", 0),
+        ):
             payload = gitig.fetch_text("https://example.com/test", "Fetching example payload")
         self.assertEqual(payload, "payload")
         self.assertIn("Fetching example payload", stream.getvalue())
-        self.assertIn("done   Fetching example payload", stream.getvalue())
+        self.assertIn("done Fetching example payload", stream.getvalue())
 
     def test_spinner_stays_quiet_when_not_interactive(self) -> None:
         class FakeStream(io.StringIO):
@@ -149,6 +160,9 @@ class OutputTests(unittest.TestCase):
                 return False
 
         class FakeResponse:
+            headers: dict[str, str] = {}
+            status = 200
+
             def __enter__(self) -> "FakeResponse":
                 return self
 
@@ -159,7 +173,11 @@ class OutputTests(unittest.TestCase):
                 return b"payload"
 
         stream = FakeStream()
-        with mock.patch.object(gitig.sys, "stderr", stream), mock.patch.object(gitig, "urlopen", return_value=FakeResponse()):
+        with (
+            mock.patch.object(gitig_spinner.sys, "stderr", stream),
+            mock.patch.object(gitig_core, "urlopen", return_value=FakeResponse()),
+            mock.patch.object(gitig_spinner.Spinner, "START_DELAY_SECONDS", 0),
+        ):
             payload = gitig.fetch_text("https://example.com/test", "Fetching example payload")
         self.assertEqual(payload, "payload")
         self.assertEqual(stream.getvalue(), "")
@@ -177,7 +195,7 @@ class LicenseTests(unittest.TestCase):
             "Copyright [year]\n[fullname]\n[project]\n[projecturl]\n",
             {"year": None, "fullname": None, "project": None, "project_url": None},
         )
-        self.assertTrue(rendered.startswith(f"Copyright {gitig.time.gmtime().tm_year}\n"))
+        self.assertTrue(rendered.startswith(f"Copyright {time.gmtime().tm_year}\n"))
         self.assertIn("[fullname]\n", rendered)
         self.assertIn("[project]\n", rendered)
         self.assertIn("[projecturl]\n", rendered)
@@ -214,45 +232,43 @@ class DispatchTests(unittest.TestCase):
             gitig.main()
         self.assertEqual(output.getvalue().strip(), gitig.get_version())
 
-    def test_print_help_uses_embedded_asset_when_src_is_missing(self) -> None:
-        with mock.patch.object(gitig, "SRC_DIR", Path("/definitely/missing-src")):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                gitig.print_help()
+    def test_print_help_reads_packaged_asset(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            gitig.print_help()
         self.assertIn("Usage:", output.getvalue())
-        self.assertIn("gitig gh:Node -nac", output.getvalue())
+        self.assertIn("gitig gh:Node -nc", output.getvalue())
 
-    def test_cmd_completion_uses_embedded_asset_when_src_is_missing(self) -> None:
-        with mock.patch.object(gitig, "SRC_DIR", Path("/definitely/missing-src")):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                gitig.cmd_completion("bash")
+    def test_cmd_completion_reads_packaged_asset(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            gitig.cmd_completion("bash")
         self.assertIn("_gitig_template_stub", output.getvalue())
 
     def test_main_bare_template_prints_to_stdout_by_default(self) -> None:
         captured: list[object] = []
         with mock.patch.object(gitig.sys, "argv", ["gitig.py", "gh:python"]), mock.patch.object(
-            gitig, "cmd_init", side_effect=lambda *args: captured.append(args)
+            gitig_cli, "cmd_init", side_effect=lambda *args, **kwargs: captured.append((args, kwargs))
         ):
             gitig.main()
         self.assertEqual(len(captured), 1)
-        self.assertTrue(captured[0][-1])
+        self.assertTrue(captured[0][1]["force_stdout"])
 
     def test_main_bare_template_append_uses_write_path(self) -> None:
         captured: list[object] = []
         with mock.patch.object(gitig.sys, "argv", ["gitig.py", "gh:python", "-nac"]), mock.patch.object(
-            gitig, "cmd_init", side_effect=lambda *args: captured.append(args)
+            gitig_cli, "cmd_init", side_effect=lambda *args, **kwargs: captured.append((args, kwargs))
         ):
             gitig.main()
         self.assertEqual(len(captured), 1)
-        self.assertFalse(captured[0][-1])
-        self.assertTrue(captured[0][5])
-        self.assertTrue(captured[0][7])
+        self.assertFalse(captured[0][1]["force_stdout"])
+        self.assertTrue(captured[0][0][5])
+        self.assertTrue(captured[0][0][7])
 
     def test_main_license_defaults_to_list(self) -> None:
         called: list[bool] = []
         with mock.patch.object(gitig.sys, "argv", ["gitig.py", "license"]), mock.patch.object(
-            gitig, "cmd_license_list", side_effect=lambda no_cache: called.append(no_cache)
+            gitig_cli, "cmd_license_list", side_effect=lambda no_cache: called.append(no_cache)
         ):
             gitig.main()
         self.assertEqual(called, [False])
