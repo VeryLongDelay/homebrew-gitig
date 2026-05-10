@@ -1,7 +1,8 @@
-.PHONY: clean build release-artifacts release formula-sha print-formula-sha formula-url test deploy-local test-local uninstall-local unlink-local
+.PHONY: clean build release-artifacts release formula-sha print-formula-sha formula-url test test-hook deploy-local test-local uninstall-local unlink-local install-hooks install-pre-commit run-pre-commit
 
 PYTHON ?= python3
 UV ?= uv
+PRE_COMMIT ?= pre-commit
 DIST_DIR ?= dist
 FORMULA ?= Formula/gitig.rb
 UV_CACHE_DIR ?= .uv-cache
@@ -32,6 +33,20 @@ release-artifacts: build
 
 test:
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python tests/test_gitig.py
+
+test-hook:
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python -m unittest tests.test_formula_hook
+
+install-hooks:
+	$(MAKE) install-pre-commit
+
+install-pre-commit:
+	chmod +x scripts/check_formula_sha.py
+	$(PRE_COMMIT) install --config .pre-commit.yml
+	@echo "Installed pre-commit hook from $(REPO_ROOT)/.pre-commit.yml"
+
+run-pre-commit:
+	$(PRE_COMMIT) run --config .pre-commit.yml --all-files
 
 deploy-local:
 	mkdir -p $(BIN_DIR)
