@@ -1,4 +1,4 @@
-.PHONY: clean build release formula-sha formula-url test deploy-local test-local uninstall-local unlink-local
+.PHONY: clean build release-artifacts release formula-sha print-formula-sha formula-url test deploy-local test-local uninstall-local unlink-local
 
 PYTHON ?= python3
 UV ?= uv
@@ -22,6 +22,13 @@ clean:
 
 build: clean
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) build
+
+release-artifacts: build
+	@echo "Built release artifacts:"
+	@ls -1 $(SDIST) $(WHEEL)
+	@echo
+	@echo "Artifact checksums:"
+	@shasum -a 256 $(SDIST) $(WHEEL)
 
 test:
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python tests/test_gitig.py
@@ -50,16 +57,12 @@ formula-sha:
 	echo "Formula: $(FORMULA)"; \
 	echo "URL: $(FORMULA_URL)"
 
+print-formula-sha: formula-sha
+
 formula-url:
 	@echo $(FORMULA_URL)
 
-release: build
-	@echo "Built release artifacts:"
-	@ls -1 $(SDIST) $(WHEEL)
-	@echo
-	@SHA="$$(shasum -a 256 $(SDIST) | awk '{print $$1}')"; \
-	echo "Python sdist checksum:"; \
-	echo "$$SHA  $(SDIST)"
+release: release-artifacts
 	@echo
 	@echo "Homebrew formula values:"
 	@echo "url \"$(FORMULA_URL)\""
