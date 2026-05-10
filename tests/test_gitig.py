@@ -9,6 +9,12 @@ import gitig
 
 
 class ParseArgsTests(unittest.TestCase):
+    def test_parse_args_version_aliases(self) -> None:
+        short = gitig.parse_args(["-v"])
+        typo = gitig.parse_args(["--verison"])
+        self.assertEqual(short.command, "version")
+        self.assertEqual(typo.command, "version")
+
     def test_parse_args_accepts_clustered_flags_before_input(self) -> None:
         parsed = gitig.parse_args(["-nac", "gh:python"])
         self.assertEqual(parsed.command, "gh:python")
@@ -196,6 +202,18 @@ class LicenseTests(unittest.TestCase):
 
 
 class DispatchTests(unittest.TestCase):
+    def test_main_version_alias_prints_version(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(gitig.sys, "argv", ["gitig.py", "-v"]), contextlib.redirect_stdout(output):
+            gitig.main()
+        self.assertEqual(output.getvalue().strip(), gitig.get_version())
+
+    def test_main_verison_typo_alias_prints_version(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(gitig.sys, "argv", ["gitig.py", "--verison"]), contextlib.redirect_stdout(output):
+            gitig.main()
+        self.assertEqual(output.getvalue().strip(), gitig.get_version())
+
     def test_print_help_uses_embedded_asset_when_src_is_missing(self) -> None:
         with mock.patch.object(gitig, "SRC_DIR", Path("/definitely/missing-src")):
             output = io.StringIO()
