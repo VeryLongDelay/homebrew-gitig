@@ -3,6 +3,10 @@ from __future__ import annotations
 from .models import Args, DetectInclude, SourceName
 
 
+class UnrecognizedCommandError(ValueError):
+    pass
+
+
 SOURCE_ALIASES = {
     "gh": "github",
     "ghg": "github-global",
@@ -146,6 +150,7 @@ def parse_args(argv: list[str]) -> Args:
                     no_comments = True
                 i += 1
                 continue
+            raise UnrecognizedCommandError("unrecognized command")
 
         if arg in ("--source", "-s"):
             i += 1
@@ -187,6 +192,9 @@ def parse_args(argv: list[str]) -> Args:
             no_color = True
             i += 1
             continue
+
+        if arg.startswith("-"):
+            raise UnrecognizedCommandError("unrecognized command")
 
         filtered.append(arg)
         i += 1

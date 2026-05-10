@@ -50,6 +50,18 @@ class ParseArgsTests(unittest.TestCase):
         self.assertEqual(parsed.rest, ["init", "mit"])
         self.assertEqual(parsed.fullname, "Jane Doe")
 
+    def test_parse_args_rejects_unknown_long_flag(self) -> None:
+        with self.assertRaises(gitig.UnrecognizedCommandError):
+            gitig.parse_args(["--wat"])
+
+    def test_parse_args_rejects_unknown_short_flag(self) -> None:
+        with self.assertRaises(gitig.UnrecognizedCommandError):
+            gitig.parse_args(["-z"])
+
+    def test_parse_args_rejects_unknown_clustered_short_flag(self) -> None:
+        with self.assertRaises(gitig.UnrecognizedCommandError):
+            gitig.parse_args(["-naz"])
+
 
 class TemplateResolutionTests(unittest.TestCase):
     def test_parse_template_args_applies_sticky_prefixes(self) -> None:
@@ -272,6 +284,22 @@ class DispatchTests(unittest.TestCase):
         ):
             gitig.main()
         self.assertEqual(called, [False])
+
+    def test_main_invalid_long_flag_prints_unrecognized_command(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(gitig.sys, "argv", ["gitig.py", "--wat"]), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                gitig.main()
+        self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(stderr.getvalue().strip(), "unrecognized command")
+
+    def test_main_invalid_short_flag_prints_unrecognized_command(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(gitig.sys, "argv", ["gitig.py", "-z"]), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                gitig.main()
+        self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(stderr.getvalue().strip(), "unrecognized command")
 
 
 if __name__ == "__main__":
