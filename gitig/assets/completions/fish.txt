@@ -1,0 +1,36 @@
+complete -c gitig -f
+complete -c gitig -n "__fish_use_subcommand" -a "list search view init I i detect compact license doctor stats check selftest completion install-completion help"
+complete -c gitig -n "__fish_seen_subcommand_from completion install-completion" -a "bash zsh fish"
+complete -c gitig -n "__fish_seen_subcommand_from list search stats" -l source -s s -a "github gh ghg ghc gitignoreio tt all"
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l source -s s -a "github gh ghg gitignoreio tt"
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l include -a "os editor os,editor"
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l append -s a
+complete -c gitig -n "__fish_seen_subcommand_from detect" -s na
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l force -s f
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l no-cache
+complete -c gitig -n "__fish_seen_subcommand_from detect" -l no-comments
+complete -c gitig -n "__fish_seen_subcommand_from detect" -s nc
+complete -c gitig -n "__fish_seen_subcommand_from compact" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from compact" -l force -s f
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -eq 2" -a "list search view init"
+complete -c gitig -n "__fish_seen_subcommand_from license; and __fish_seen_subcommand_from list search view init doctor check selftest" -l no-cache
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l append -s a
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l fullname -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l author -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l owner -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l project -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l projecturl -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l project-url -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l year -r
+complete -c gitig -n "__fish_seen_subcommand_from license; and test (count (commandline -opc)) -ge 2" -l force -s f
+complete -c gitig -n "__fish_seen_subcommand_from doctor check selftest" -l no-cache
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l source -s s -a "github gh ghg ghc gitignoreio tt"
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l output -s o -r
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l append -s a
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -s na
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l force -s f
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l no-cache
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -l no-comments
+complete -c gitig -n "__fish_seen_subcommand_from view init I i" -s nc

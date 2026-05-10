@@ -32,6 +32,16 @@ It can:
 python3 gitig.py help
 ```
 
+### With Homebrew (tap in this repo)
+
+```bash
+brew tap verylongdelay/gitig
+brew install gitig
+gitig selftest
+```
+
+Note: `Formula/gitig.rb` is updated on tag releases to set the correct `url` and `sha256`.
+
 ## Commands
 
 ```text
@@ -200,14 +210,24 @@ gitig install-completion fish
 ## Development
 
 ```bash
-npm install
-npm run build
-node dist/gitig.js doctor
+uv venv
+. .venv/bin/activate
+
+uv pip install -e .
+gitig selftest
+```
+
+### Build (sdist/wheel)
+
+```bash
+uv build
+python -m pip install dist/*.tar.gz
+gitig selftest
 ```
 
 ## Publishing checklist
 
 ```bash
-npm run build
-npm pack
+uv build
+gitig selftest
 ```

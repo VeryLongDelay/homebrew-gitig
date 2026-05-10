@@ -1,0 +1,127 @@
+#compdef gitig
+
+local -a _gitig_commands
+local -a _gitig_all_sources
+local -a _gitig_single_sources
+local -a _gitig_detect_sources
+local -a _gitig_include_values
+local -a _gitig_license_subcommands
+local -a _gitig_shells
+
+_gitig_commands=(list search view init I i detect compact license doctor stats check selftest completion install-completion help)
+_gitig_all_sources=(github gh ghg ghc gitignoreio tt all)
+_gitig_single_sources=(github gh ghg ghc gitignoreio tt)
+_gitig_detect_sources=(github gh ghg gitignoreio tt)
+_gitig_include_values=(os editor os,editor)
+_gitig_license_subcommands=(list search view init)
+_gitig_shells=(bash zsh fish)
+
+_gitig_template_stub() {
+    local mode="$1"
+
+    case "$mode" in
+        shell)
+            _describe -t shells 'shells' _gitig_shells
+            ;;
+        include)
+            _describe -t includes 'includes' _gitig_include_values
+            ;;
+        license-subcommand)
+            _describe -t commands 'license commands' _gitig_license_subcommands
+            ;;
+        detect-source)
+            _describe -t sources 'sources' _gitig_detect_sources
+            ;;
+        single-source)
+            _describe -t sources 'sources' _gitig_single_sources
+            ;;
+        any-source)
+            _describe -t sources 'sources' _gitig_all_sources
+            ;;
+        template)
+            _files
+            ;;
+    esac
+}
+
+_gitig() {
+    local context state line
+
+    _arguments -C \
+        '1:command:->command' \
+        '--source[template source]:source:->source' \
+        '-s[template source]:source:->source' \
+        '--include[extra detect categories]:include:->include' \
+        '--output[output file]:file:_files' \
+        '-o[output file]:file:_files' \
+        '--append[append to the output file and dedupe immediately]' \
+        '-a[append to the output file and dedupe immediately]' \
+        '-na[append with full-line comments stripped]' \
+        '--fullname[replacement for [fullname]]:fullname:' \
+        '--author[alias for --fullname]:fullname:' \
+        '--owner[alias for --fullname]:fullname:' \
+        '--project[replacement for [project]]:project:' \
+        '--projecturl[replacement for [projecturl]]:project-url:' \
+        '--project-url[replacement for [projecturl]]:project-url:' \
+        '--year[copyright year for license templates]:year:' \
+        '--force[overwrite output file]' \
+        '-f[overwrite output file]' \
+        '--no-cache[disable catalog cache]' \
+        '--no-comments[strip full-line comments and collapse blank runs]' \
+        '-nc[strip full-line comments and collapse blank runs]' \
+        '*::arg:->args'
+
+    case "$state" in
+        command)
+            _describe -t commands 'commands' _gitig_commands
+            return
+            ;;
+        source)
+            case "$words[2]" in
+                detect)
+                    _gitig_template_stub detect-source
+                    ;;
+                list|search|stats)
+                    _gitig_template_stub any-source
+                    ;;
+                *)
+                    _gitig_template_stub single-source
+                    ;;
+            esac
+            return
+            ;;
+        include)
+            _gitig_template_stub include
+            return
+            ;;
+        args)
+            case "$words[2]" in
+                completion|install-completion)
+                    _gitig_template_stub shell
+                    ;;
+                view|init|I|i|detect)
+                    _gitig_template_stub template
+                    ;;
+                license)
+                    case "$words[3]" in
+                        view|init)
+                            _gitig_template_stub template
+                            ;;
+                        "")
+                            _gitig_template_stub license-subcommand
+                            ;;
+                        *)
+                            _files
+                            ;;
+                    esac
+                    ;;
+                *)
+                    _files
+                    ;;
+            esac
+            return
+            ;;
+    esac
+}
+
+_gitig "$@"

@@ -1,0 +1,35 @@
+ [build-system]
+ requires = ["setuptools>=69", "wheel"]
+ build-backend = "setuptools.build_meta"
+
+ [project]
+ name = "gitig"
+ version = "0.0.0"
+ description = "An ignorant CLI for generating .gitignore and LICENSE files"
+ readme = "README.md"
+ requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+ authors = [{ name = "verylongdelay" }]
+ keywords = ["gitignore", "license", "cli"]
+ classifiers = [
+   "Programming Language :: Python :: 3",
+   "Environment :: Console",
+ ]
+
+ [project.urls]
+ Homepage = "https://github.com/verylongdelay/gitig"
+ Repository = "https://github.com/verylongdelay/gitig"
+
+ [project.scripts]
+ gitig = "gitig.cli:main"
+
+ [tool.setuptools]
+ include-package-data = true
+
+ [tool.setuptools.packages.find]
+ where = ["."]
+ include = ["gitig*"]
+
+ [tool.setuptools.package-data]
+ gitig = ["assets/**/*.txt"]
